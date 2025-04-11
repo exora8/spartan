@@ -1,130 +1,211 @@
 #!/bin/bash
 
-# --- Konfigurasi (Sama seperti di atas) ---
-# Ambil API Keys dari environment variable
+# ==============================================================================
+# Script Bash untuk Mendengarkan Email TradingView dan Eksekusi Order Binance
+# PERINGATAN: GUNAKAN DENGAN RISIKO ANDA SENDIRI! UJI DI TESTNET DULU!
+# Pastikan prasyarat (curl, openssl, jq) terinstall.
+# ==============================================================================
+
+### --- KONFIGURASI --- ###
+# --- Email (IMAP) ---
+IMAP_SERVER="imap.gmail.com" # Ganti dengan server IMAP provider email Anda
+IMAP_PORT="993" # Port IMAP (biasanya 993 untuk SSL/TLS)
+IMAP_USER="email_anda@gmail.com" # Alamat email Anda
+IMAP_PASS="password_app_anda" # GUNAKAN APP PASSWORD, BUKAN PASSWORD UTAMA!
+EMAIL_SENDER="noreply@tradingview.com" # Pastikan ini alamat email pengirim alert TradingView
+EMAIL_SUBJECT_KEYWORD="Alert:" # Opsional: Kata kunci di subjek untuk filter tambahan
+
+# --- Binance ---
+# Ganti dengan URL API Testnet jika sedang menguji: https://testnet.binance.vision/api
+BINANCE_API_URL="https://api.binance.com"
+# !! SANGAT TIDAK AMAN MENYIMPAN KEY DI SINI !! Gunakan env variable atau cara lain!
+# export BINANCE_API_KEY="your_api_key"
+# export BINANCE_SECRET_KEY="your_secret_key"
 API_KEY="${BINANCE_API_KEY}"
 SECRET_KEY="${BINANCE_SECRET_KEY}"
-BINANCE_API_URL="https://api.binance.com" # Atau testnet
 
-DEFAULT_QUANTITY_USDT=11
-LOG_FILE="/path/to/your/trading_bot_polling.log"
-TRADINGVIEW_SENDER="tradingview.com" # Atau alamat email lengkap jika lebih spesifik
+# --- Trading ---
+TRADING_SYMBOL="BTCUSDT" # Ganti dengan pair yang ingin di-trade
+ORDER_QUANTITY="0.001" # Ganti dengan jumlah yang ingin di-trade (sesuaikan dengan minimum order size)
+ORDER_TYPE="MARKET" # Tipe order (MARKET atau LIMIT) - MARKET lebih simpel untuk script ini
 
-# Konfigurasi Email (untuk Mutt)
-EMAIL_USER="your_email@example.com"
-EMAIL_PASSWORD="YOUR_EMAIL_APP_PASSWORD" # Gunakan App Password!
-IMAP_SERVER="imaps://imap.your_email_provider.com/" # Format imaps://...
-EMAIL_FOLDER="INBOX" # Folder yang dicek
-CHECK_INTERVAL=60 # Detik (misal 1 menit)
+# --- Lain-lain ---
+CHECK_INTERVAL_SECONDS=60 # Berapa detik sekali cek email baru
+LOG_FILE="/var/log/tradingview_binance_bot.log" # File untuk logging
+DEBUG=true # Set ke true untuk output lebih detail
 
-# --- Fungsi Logging (Sama seperti di atas) ---
+### --- FUNGSI --- ###
+
 log_message() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "${LOG_FILE}"
 }
 
-# --- Fungsi Eksekusi Order Binance (Sama seperti di atas) ---
+debug_message() {
+    if [ "$DEBUG" = true ]; then
+        log_message "DEBUG: $1"
+    fi
+}
+
+# Fungsi untuk membuat signature HMAC-SHA256
+create_signature() {
+    local query_string="$1"
+    echo -n "${query_string}" | openssl dgst -sha256 -hmac "${SECRET_KEY}" | sed 's/^.* //')
+}
+
+# Fungsi untuk mengirim order ke Binance
 execute_binance_order() {
-    # ... (Salin fungsi execute_binance_order dari pendekatan 1 ke sini) ...
-    local side=$1
-    local symbol=$2
-    local quantity=$DEFAULT_QUANTITY_USDT # Menggunakan Quote Order Quantity
+    local side="$1" # Harus "BUY" atau "SELL"
+    local symbol="$2"
+    local quantity="$3"
+    local order_type="$4"
 
-    if [[ -z "$API_KEY" || -z "$SECRET_KEY" ]]; then log_message "ERROR: API Key/Secret kosong."; return 1; fi
-    if [[ -z "$side" || -z "$symbol" ]]; then log_message "ERROR: Side/Symbol kosong."; return 1; fi
+    if [ -z "$API_KEY" ] || [ -z "$SECRET_KEY" ]; then
+        log_message "ERROR: API Key atau Secret Key Binance belum di-set."
+        return 1
+    fi
 
-    log_message "INFO: Mempersiapkan order $side $symbol sejumlah ~$quantity USDT."
     local endpoint="/api/v3/order"
-    local timestamp=$(date +%s%3N)
-    local query_string="symbol=${symbol}&side=${side}&type=MARKET"eOrderQty=${quantity}×tamp=${timestamp}"
-    local signature=$(echo -n "$query_string" | openssl dgst -sha256 -hmac "$SECRET_KEY" | sed 's/^.* //')
-    local full_url="${BINANCE_API_URL}${endpoint}?${query_string}&signature=${signature}"
+    local timestamp=$(($(date +%s%N)/1000000)) # Timestamp dalam milidetik
+    local query_string="symbol=${symbol}&side=${side}&type=${order_type}&quantity=${quantity}×tamp=${timestamp}"
+    local signature=$(create_signature "${query_string}")
 
-    log_message "INFO: Mengirim request ke Binance..."
-    response=$(curl -s -H "X-MBX-APIKEY: ${API_KEY}" -X POST "$full_url")
-    log_message "INFO: Respons Binance: $(echo "$response" | jq .)"
+    local full_url="${BINANCE_API_URL}${endpoint}"
 
-    if echo "$response" | jq -e '.code' > /dev/null; then
-        local error_code=$(echo "$response" | jq -r '.code')
-        local error_msg=$(echo "$response" | jq -r '.msg')
-        log_message "ERROR: Binance API Error! Code: $error_code, Msg: $error_msg"
-        return 1
-    elif echo "$response" | jq -e '.orderId' > /dev/null; then
-        local order_id=$(echo "$response" | jq -r '.orderId')
-        log_message "SUCCESS: Order $side $symbol berhasil! OrderID: $order_id"
-        return 0
+    log_message "Mengirim order: SIDE=${side}, SYMBOL=${symbol}, QTY=${quantity}, TYPE=${order_type}"
+
+    response=$(curl -s -H "X-MBX-APIKEY: ${API_KEY}" -X POST "${full_url}?${query_string}&signature=${signature}")
+
+    debug_message "Binance Raw Response: ${response}"
+
+    # Cek error dasar atau parse jika pakai jq
+    if command -v jq > /dev/null; then
+        order_id=$(echo "$response" | jq -r '.orderId // empty')
+        error_code=$(echo "$response" | jq -r '.code // empty')
+        error_msg=$(echo "$response" | jq -r '.msg // empty')
+
+        if [ -n "$order_id" ]; then
+            log_message "SUCCESS: Order berhasil dieksekusi. OrderID: ${order_id}"
+            log_message "Detail: $(echo "$response" | jq -c .)" # Log detail JSON
+            return 0
+        elif [ -n "$error_code" ]; then
+            log_message "ERROR: Gagal eksekusi order. Code: ${error_code}, Msg: ${error_msg}"
+            return 1
+        else
+            log_message "WARNING: Respons Binance tidak dikenali: ${response}"
+            return 1
+        fi
     else
-        log_message "ERROR: Respons tidak dikenal dari Binance API."
-        return 1
+        # Fallback jika jq tidak ada (kurang ideal)
+        if [[ "$response" == *"orderId"* ]]; then
+             log_message "SUCCESS: Order sepertinya berhasil dieksekusi (jq tidak ditemukan untuk detail)."
+             log_message "Raw Response: ${response}"
+             return 0
+        else
+             log_message "ERROR: Gagal eksekusi order (jq tidak ditemukan untuk detail)."
+             log_message "Raw Response: ${response}"
+             return 1
+        fi
     fi
 }
 
+# Fungsi untuk mengambil dan memproses email baru
+check_and_process_emails() {
+    log_message "Mengecek email baru..."
 
-# --- Fungsi Memproses Email ---
-process_email_content() {
-    local email_content="$1"
-    log_message "INFO: Memulai parsing email..."
+    # 1. Cari email UNSEEN dari sender yang ditentukan
+    # Opsi Subject: SUBJECT \"${EMAIL_SUBJECT_KEYWORD}\"
+    local search_command="SEARCH UNSEEN FROM \"${EMAIL_SENDER}\""
+    debug_message "IMAP Command: ${search_command}"
 
-    # Ekstrak sinyal - **SESUAIKAN DENGAN FORMAT EMAIL ANDA**
-    signal_line=$(echo "$email_content" | grep -i '^SIGNAL:' | head -n 1)
-    symbol_line=$(echo "$email_content" | grep -i '^SYMBOL:' | head -n 1)
+    # Menggunakan curl untuk IMAP (pastikan curl dikompilasi dengan support IMAP/SSL)
+    local email_ids=$(curl -s --url "imaps://${IMAP_SERVER}:${IMAP_PORT}/INBOX" --user "${IMAP_USER}:${IMAP_PASS}" -X "${search_command}")
 
-    side=$(echo "$signal_line" | awk -F': *' '{print $2}' | tr '[:lower:]' '[:upper:]' | tr -d '\r')
-    symbol=$(echo "$symbol_line" | awk -F': *' '{print $2}' | tr -d '\r')
+    debug_message "IMAP Search Response: ${email_ids}"
 
-    log_message "DEBUG: Ditemukan Side='$side', Symbol='$symbol'"
+    # Ekstrak ID email (angka setelah '* SEARCH ')
+    local ids=$(echo "$email_ids" | grep '^* SEARCH' | sed 's/^* SEARCH //')
 
-    if [[ "$side" == "BUY" || "$side" == "SELL" ]] && [[ -n "$symbol" ]]; then
-        log_message "INFO: Sinyal valid: $side $symbol. Mencoba eksekusi..."
-        execute_binance_order "$side" "$symbol"
-        # Tandai email sebagai sudah dibaca atau hapus di server (jika diperlukan/diinginkan)
-        # Ini bagian yang lebih kompleks dengan mutt, mungkin perlu ID email
-    else
-        log_message "WARN: Sinyal tidak valid/ditemukan. Side='$side', Symbol='$symbol'."
+    if [ -z "$ids" ]; then
+        log_message "Tidak ada email baru yang belum dibaca dari ${EMAIL_SENDER}."
+        return
     fi
+
+    log_message "Menemukan email baru dengan ID: ${ids}"
+
+    # Proses setiap ID email
+    for msg_id in $ids; do
+        log_message "Memproses email ID: ${msg_id}..."
+
+        # 2. Ambil konten email (Body)
+        # Perhatian: Mengambil BODY[TEXT] mungkin lebih efisien, tapi perlu parsing lebih canggih
+        # Untuk simpelnya, ambil seluruh message source dan grep
+        local fetch_command="FETCH ${msg_id} BODY[]"
+        debug_message "IMAP Fetch Command: ${fetch_command}"
+        local email_content=$(curl -s --url "imaps://${IMAP_SERVER}:${IMAP_PORT}/INBOX" --user "${IMAP_USER}:${IMAP_PASS}" -X "${fetch_command}")
+
+        # Simpan sementara konten email untuk debug jika perlu
+        # echo "${email_content}" > "/tmp/email_${msg_id}.txt"
+        # debug_message "Konten email mentah disimpan di /tmp/email_${msg_id}.txt"
+
+        # 3. Parsing sinyal BUY/SELL (SANGAT SIMPLISTIK!)
+        # Asumsi: Ada kata "BUY" atau "SELL" di body email dengan huruf besar.
+        # Sesuaikan pola `grep` ini sesuai format email alert TradingView kamu!
+        local signal="NONE"
+        if echo "${email_content}" | grep -q -E '\bBUY\b'; then
+            signal="BUY"
+        elif echo "${email_content}" | grep -q -E '\bSELL\b'; then
+            signal="SELL"
+        fi
+
+        # 4. Eksekusi order jika sinyal ditemukan
+        if [ "$signal" != "NONE" ]; then
+            log_message "Sinyal terdeteksi: ${signal} untuk ${TRADING_SYMBOL}"
+            execute_binance_order "${signal}" "${TRADING_SYMBOL}" "${ORDER_QUANTITY}" "${ORDER_TYPE}"
+            # Jika eksekusi berhasil atau gagal, kita tetap tandai email sudah diproses
+            local mark_seen_command="STORE ${msg_id} +FLAGS (\Seen)"
+            debug_message "IMAP Mark Seen Command: ${mark_seen_command}"
+            curl -s --url "imaps://${IMAP_SERVER}:${IMAP_PORT}/INBOX" --user "${IMAP_USER}:${IMAP_PASS}" -X "${mark_seen_command}" > /dev/null
+            log_message "Email ID ${msg_id} ditandai sebagai sudah dibaca."
+        else
+            log_message "Tidak ada sinyal BUY/SELL yang jelas terdeteksi di email ID ${msg_id}. Mungkin perlu penyesuaian parsing."
+            # Pertimbangkan apakah email tanpa sinyal jelas harus ditandai SEEN atau tidak
+             local mark_seen_command="STORE ${msg_id} +FLAGS (\Seen)"
+             debug_message "IMAP Mark Seen Command: ${mark_seen_command}"
+             curl -s --url "imaps://${IMAP_SERVER}:${IMAP_PORT}/INBOX" --user "${IMAP_USER}:${IMAP_PASS}" -X "${mark_seen_command}" > /dev/null
+             log_message "Email ID ${msg_id} tanpa sinyal ditandai sebagai sudah dibaca."
+        fi
+         # Beri jeda sedikit antar pemrosesan email jika ada banyak
+        sleep 2
+    done
 }
 
-# --- Main Loop ---
-log_message "INFO: Memulai bot polling email..."
+### --- MAIN LOOP --- ###
+
+log_message "Memulai script listener email TradingView..."
+
+if [ -z "$API_KEY" ] || [ -z "$SECRET_KEY" ]; then
+    log_message "FATAL: Binance API Key atau Secret Key tidak ditemukan. Set environment variable BINANCE_API_KEY dan BINANCE_SECRET_KEY."
+    exit 1
+fi
+
+# Cek konektivitas awal ke IMAP (opsional tapi bagus)
+log_message "Mencoba koneksi awal ke IMAP ${IMAP_SERVER}..."
+check_imap=$(curl -s --connect-timeout 10 --url "imaps://${IMAP_SERVER}:${IMAP_PORT}" --user "${IMAP_USER}:${IMAP_PASS}" -X "NOOP")
+if [[ $check_imap != *"OK NOOP completed"* ]]; then
+     log_message "FATAL: Gagal terhubung ke server IMAP atau login salah. Cek kredensial dan koneksi."
+     debug_message "IMAP NOOP Response: ${check_imap}"
+     exit 1
+else
+    log_message "Koneksi IMAP awal berhasil."
+fi
+
 
 while true; do
-    log_message "DEBUG: Mengecek email baru..."
-
-    # Gunakan mutt untuk mencari email baru dari TradingView dan mencetak bodynya
-    # Perintah mutt bisa kompleks dan rapuh. Ini contoh dasar:
-    # -f : mailbox
-    # -e 'set mail_check=0' : Non-aktifkan pemeriksaan interaktif
-    # -e 'set timeout=10' : Timeout
-    # -e 'set confirmappend=no delete=yes' : Untuk otomatis hapus setelah proses (HATI-HATI!) -> Lebih aman pakai 'set delete=ask-yes' atau flag N
-    # push 'l ~N ~f tradingview.com\n' : Batasi ke email baru (N) dari sender (f)
-    # push 'p\n' : Cetak email pertama yang cocok
-    # push 'q\n' : Keluar
-    # Perlu diuji secara ekstensif!
-
-    # Alternatif lebih aman: Dapatkan daftar ID email baru, lalu fetch satu per satu
-    # Ini contoh SANGAT DASAR untuk mendapatkan body email baru pertama dari pengirim tertentu
-    # Mungkin perlu penyesuaian besar tergantung versi mutt dan konfigurasi server
-    new_email=$(mutt -f "${IMAP_SERVER}${EMAIL_FOLDER}" \
-                     -e "set user=${EMAIL_USER} pass=${EMAIL_PASSWORD}" \
-                     -e "set mail_check=0 timeout=15 confirmappend=no delete=no" \
-                     -e "push 'l ~N ~f ${TRADINGVIEW_SENDER}\n'" \
-                     -e "push 'p\n'" \
-                     -e "push 'q\n'" 2>/dev/null | sed -n '/^Content-Type:/,$p' | sed '1d') # Coba ekstrak body
-
-    if [[ -n "$new_email" ]]; then
-        log_message "INFO: Email baru terdeteksi dari ${TRADINGVIEW_SENDER}."
-        echo "$new_email" >> /path/to/your/last_email_polled.log # Simpan salinan
-        process_email_content "$new_email"
-        # Di sini perlu logika untuk menandai email sebagai sudah diproses/dibaca
-        # agar tidak diproses lagi di iterasi berikutnya. Ini bagian sulit dengan mutt
-        # tanpa interaksi. Mungkin perlu memindahkan email ke folder lain.
-        log_message "INFO: Selesai memproses email yang terdeteksi."
-
-        # Beri jeda sedikit setelah memproses email
-        sleep 5
-    else
-        log_message "DEBUG: Tidak ada email baru dari ${TRADINGVIEW_SENDER}."
-    fi
-
-    log_message "DEBUG: Tidur selama ${CHECK_INTERVAL} detik..."
-    sleep "$CHECK_INTERVAL"
+    check_and_process_emails
+    log_message "Menunggu ${CHECK_INTERVAL_SECONDS} detik sebelum cek berikutnya..."
+    sleep "${CHECK_INTERVAL_SECONDS}"
 done
+
+log_message "Script dihentikan." # Seharusnya tidak pernah sampai sini dalam mode normal
+
+exit 0
