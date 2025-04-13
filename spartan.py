@@ -1,413 +1,381 @@
-#!/bin/bash
+import imaplib
+import email
+from email.header import decode_header
+import json
+import time
+import os
+import sys
+import re # Untuk parsing yang lebih fleksibel
+import winsound # Hanya untuk Windows!
+from getpass import getpass # Untuk input password tersembunyi
 
-# --- Konfigurasi ---
-CONFIG_FILE="$HOME/.config/exora_listener/config"
-PYTHON_SCRIPT_PATH="$(dirname "$0")/gmail_checker.py" # Asumsi python script di direktori yg sama
-LOG_FILE="$HOME/.local/share/exora_listener/activity.log"
+# Rich untuk CLI yang lebih baik
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt, Confirm
+from rich.live import Live
+from rich.spinner import Spinner
+from rich.text import Text
 
-# Default values (akan ditimpa oleh file config jika ada)
-GMAIL_EMAIL=""
-GMAIL_APP_PASSWORD=""
-CHECK_INTERVAL=30 # Detik
-BEEP_BUY_DURATION=5000 # Milidetik untuk beep panjang (5 detik)
-BEEP_BUY_FREQ=1000 # Hz
-BEEP_SELL_DURATION=500 # Milidetik untuk beep pendek
-BEEP_SELL_FREQ=800  # Hz
-BEEP_SELL_REPEATS=2
-BEEP_SELL_DELAY=1 # Detik antar beep jual
+# Inisialisasi Console Rich
+console = Console()
 
-# --- Variabel Global ---
-listener_active=false
-last_processed_uid="" # Untuk menghindari pemrosesan ulang email yang sama (opsional)
-
-# --- Warna & Format (menggunakan tput) ---
-BOLD=$(tput bold)
-RESET=$(tput sgr0)
-RED=$(tput setaf 1)
-GREEN=$(tput setaf 2)
-YELLOW=$(tput setaf 3)
-BLUE=$(tput setaf 4)
-CYAN=$(tput setaf 6)
-
-# --- Fungsi Utility ---
-
-# Membuat direktori jika belum ada
-ensure_dirs() {
-    mkdir -p "$(dirname "$CONFIG_FILE")"
-    mkdir -p "$(dirname "$LOG_FILE")"
+CONFIG_FILE = 'config.json'
+DEFAULT_CONFIG = {
+    "email": "MASUKKAN_EMAIL_ANDA@gmail.com",
+    "app_password": "MASUKKAN_APP_PASSWORD_ANDA",
+    "check_interval_seconds": 60
 }
 
-# Logging
-log_message() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-}
+# --- Fungsi Konfigurasi ---
+def load_config():
+    """Memuat konfigurasi dari file JSON."""
+    if not os.path.exists(CONFIG_FILE):
+        console.print(f"[yellow]File konfigurasi '{CONFIG_FILE}' tidak ditemukan. Membuat default.[/yellow]")
+        save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+            # Pastikan semua kunci ada
+            for key, value in DEFAULT_CONFIG.items():
+                if key not in config:
+                    config[key] = value
+            return config
+    except json.JSONDecodeError:
+        console.print(f"[bold red]Error: Format file '{CONFIG_FILE}' tidak valid. Menggunakan default.[/bold red]")
+        # Mungkin backup file lama dan buat yang baru
+        # os.rename(CONFIG_FILE, CONFIG_FILE + '.bak')
+        save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG
+    except Exception as e:
+        console.print(f"[bold red]Error saat memuat konfigurasi: {e}. Menggunakan default.[/bold red]")
+        return DEFAULT_CONFIG
 
-# Memeriksa dependensi
-check_dependencies() {
-    local missing=0
-    command -v python3 >/dev/null 2>&1 || { echo >&2 "${RED}Error:${RESET} 'python3' tidak ditemukan. Silakan install."; missing=1; }
-    command -v beep >/dev/null 2>&1 || { echo >&2 "${YELLOW}Warning:${RESET} 'beep' tidak ditemukan. Notifikasi suara tidak akan berfungsi. Install 'beep'."; } # Warning, not critical failure
-    [ -f "$PYTHON_SCRIPT_PATH" ] || { echo >&2 "${RED}Error:${RESET} Script Python '$PYTHON_SCRIPT_PATH' tidak ditemukan."; missing=1; }
+def save_config(config):
+    """Menyimpan konfigurasi ke file JSON."""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+        # console.print(f"[green]Konfigurasi disimpan ke '{CONFIG_FILE}'[/green]")
+    except Exception as e:
+        console.print(f"[bold red]Error saat menyimpan konfigurasi: {e}[/bold red]")
 
-    if [ $missing -eq 1 ]; then
-        exit 1
-    fi
-    # Cek apakah user punya permission untuk beep (mungkin perlu adduser ke group 'input' atau modprobe pcspkr)
-    # Ini hanya bisa dideteksi saat mencoba beep pertama kali.
-}
+# --- Fungsi Beep (Windows Specific) ---
+def beep_buy():
+    """Memainkan suara beep untuk sinyal BUY (5 detik on/off)."""
+    console.print("[bold green]>>> BUY Signal Detected! Playing sound... <<<[/bold green]")
+    frequency = 1000  # Hz
+    duration_on = 500  # milliseconds
+    duration_off = 500 # milliseconds
+    start_time = time.time()
+    while time.time() - start_time < 5: # Loop selama 5 detik
+        try:
+            winsound.Beep(frequency, duration_on)
+            time.sleep(duration_off / 1000.0) # Sleep butuh detik
+        except RuntimeError:
+             console.print("[yellow]Tidak bisa memainkan suara (mungkin tidak ada sound device?).[/yellow]")
+             break # Keluar jika error
+        except Exception as e:
+             console.print(f"[red]Error saat beep: {e}[/red]")
+             break
 
-# Memuat konfigurasi
-load_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        # Source the config file carefully
-        # Prevent command execution from config file
-        local line
-        while IFS='=' read -r key value || [[ -n "$key" ]]; do
-            # Remove surrounding quotes if any, trim whitespace
-            value=$(echo "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e "s/^'//" -e "s/'$//" -e 's/^"//' -e 's/"$//')
-            key=$(echo "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-            # Assign to known variables only
-            case "$key" in
-                GMAIL_EMAIL) GMAIL_EMAIL="$value" ;;
-                GMAIL_APP_PASSWORD) GMAIL_APP_PASSWORD="$value" ;;
-                CHECK_INTERVAL) CHECK_INTERVAL="$value" ;;
-                # Add other config vars here if needed
-            esac
-        done < "$CONFIG_FILE"
-        log_message "Konfigurasi dimuat dari $CONFIG_FILE"
-        return 0 # Success
-    else
-        log_message "File konfigurasi $CONFIG_FILE tidak ditemukan."
-        return 1 # Not found
-    fi
-}
+def beep_sell():
+    """Memainkan suara beep untuk sinyal SELL (2 kali beep dalam 5 detik)."""
+    console.print("[bold red]>>> SELL Signal Detected! Playing sound... <<<[/bold red]")
+    frequency = 1500  # Hz (beda frekuensi biar beda)
+    duration = 1000  # milliseconds (1 detik beep)
+    try:
+        winsound.Beep(frequency, duration)
+        time.sleep(0.5) # Jeda antar beep
+        winsound.Beep(frequency, duration)
+    except RuntimeError:
+         console.print("[yellow]Tidak bisa memainkan suara (mungkin tidak ada sound device?).[/yellow]")
+    except Exception as e:
+         console.print(f"[red]Error saat beep: {e}[/red]")
 
-# Menyimpan konfigurasi
-save_config() {
-    ensure_dirs
-    echo "# Konfigurasi Exora AI Listener" > "$CONFIG_FILE"
-    echo "GMAIL_EMAIL='$GMAIL_EMAIL'" >> "$CONFIG_FILE"
-    echo "GMAIL_APP_PASSWORD='$GMAIL_APP_PASSWORD'" >> "$CONFIG_FILE"
-    echo "CHECK_INTERVAL='$CHECK_INTERVAL'" >> "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE" # Set permissions (read/write only for owner)
-    log_message "Konfigurasi disimpan ke $CONFIG_FILE"
-    echo "${GREEN}Konfigurasi disimpan.${RESET}"
-}
 
-# Meminta input user untuk konfigurasi awal
-prompt_initial_config() {
-    echo "${YELLOW}Konfigurasi awal diperlukan.${RESET}"
-    while [ -z "$GMAIL_EMAIL" ]; do
-        read -p "Masukkan alamat email Gmail Anda: " GMAIL_EMAIL
-    done
-    while [ -z "$GMAIL_APP_PASSWORD" ]; do
-        read -sp "Masukkan Gmail App Password Anda: " GMAIL_APP_PASSWORD
-        echo
-    done
-    read -p "Masukkan interval pengecekan (detik) [Default: $CHECK_INTERVAL]: " input_interval
-    CHECK_INTERVAL=${input_interval:-$CHECK_INTERVAL} # Gunakan input atau default
-    save_config
-}
+# --- Fungsi Email ---
+def clean_text(text):
+    """Membersihkan teks dari karakter aneh dan spasi berlebih."""
+    if text is None:
+        return ""
+    # Hapus spasi berlebih dan ganti newline dengan spasi
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-# --- Fungsi Inti ---
+def get_email_body(msg):
+    """Mendapatkan body teks dari objek email, menangani multipart."""
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            content_disposition = str(part.get("Content-Disposition"))
 
-# Menjalankan Python script untuk cek email
-run_email_check() {
-    if [ -z "$GMAIL_EMAIL" ] || [ -z "$GMAIL_APP_PASSWORD" ]; then
-        echo "${RED}Error:${RESET} Email atau App Password belum diatur di Settings."
-        log_message "Gagal cek email: Konfigurasi belum lengkap."
-        return 1
-    fi
+            # Cari bagian text/plain, abaikan attachment
+            if content_type == "text/plain" and "attachment" not in content_disposition:
+                try:
+                    # Coba decode payload
+                    charset = part.get_content_charset()
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        body = payload.decode(charset if charset else 'utf-8', errors='ignore')
+                        break # Ambil body text/plain pertama saja
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Tidak bisa decode bagian email: {e}[/yellow]")
+                    # Coba ambil payload mentah jika decode gagal
+                    raw_payload = part.get_payload()
+                    if isinstance(raw_payload, str):
+                         body = raw_payload # Anggap saja sudah string
+                         break
 
-    # Menjalankan script python dan menangkap outputnya
-    # stderr dari python akan muncul di terminal listener ini
-    local email_data
-    email_data=$(python3 "$PYTHON_SCRIPT_PATH" "imap.gmail.com" "$GMAIL_EMAIL" "$GMAIL_APP_PASSWORD" 2>&1)
-    local python_exit_code=$?
+    else: # Email bukan multipart
+        content_type = msg.get_content_type()
+        if content_type == "text/plain":
+             try:
+                charset = msg.get_content_charset()
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    body = payload.decode(charset if charset else 'utf-8', errors='ignore')
+             except Exception as e:
+                console.print(f"[yellow]Warning: Tidak bisa decode body email non-multipart: {e}[/yellow]")
+                raw_payload = msg.get_payload()
+                if isinstance(raw_payload, str):
+                     body = raw_payload
 
-    # Cek jika python script mengembalikan error
-    if [ $python_exit_code -ne 0 ] || [[ "$email_data" == *"ERROR_PYTHON"* ]] || [[ "$email_data" == *"IMAP_ERROR_PYTHON"* ]] || [[ "$email_data" == *"GENERAL_ERROR_PYTHON"* ]]; then
-        echo "${RED}Error saat menjalankan Python checker:${RESET}"
-        echo "$email_data" # Tampilkan pesan error dari Python
-        log_message "Error dari Python script: $email_data"
-        return 1
-    fi
+    return clean_text(body)
 
-    # Cek jika tidak ada output (tidak ada email baru yang relevan)
-    if [ -z "$email_data" ]; then
-        # echo "DEBUG: Tidak ada email baru yang cocok." # Uncomment for debugging
-        return 2 # Indicate no new relevant email found
-    fi
+def parse_email_for_signal(text_content):
+    """Menganalisa teks email untuk mencari sinyal 'Exora AI' dan order 'buy'/'sell'."""
+    if not text_content:
+        return None
 
-    # Jika ada output, kembalikan data email
-    echo "$email_data"
-    return 0 # Success, email data found
-}
+    text_lower = text_content.lower() # Case-insensitive
 
-# Mem-parsing output dari Python script
-parse_email_data() {
-    local data="$1"
-    local subject=""
-    local body=""
-    local uid=""
+    if "exora ai" not in text_lower:
+        return None # Tidak ada keyword utama
 
-    # Ekstrak menggunakan delimiter :::
-    subject=$(echo "$data" | sed -n 's/.*SUBJECT:\[\(.*\)\]:::BODY:.*/\1/p')
-    body=$(echo "$data" | sed -n 's/.*BODY:\[\(.*\)\]:::UID:.*/\1/p')
-    uid=$(echo "$data" | sed -n 's/.*UID:\[\(.*\)\]/\1/p')
+    # Cari kata 'order'
+    match = re.search(r'order\s+(\w+)', text_lower) # Cari 'order' diikuti satu kata
+    if match:
+        signal = match.group(1).strip() # Ambil kata setelah 'order'
+        if signal == "buy":
+            return "buy"
+        elif signal == "sell":
+            return "sell"
 
-    # Fallback jika sed gagal (misal ada karakter aneh), coba cara lain (kurang robus)
-    # if [ -z "$subject" ] && [ -z "$body" ]; then ... fi
+    return None # Tidak ditemukan pola 'order buy' atau 'order sell'
 
-    # Gabungkan subject dan body untuk pencarian teks
-    local full_content="${subject} ${body}"
+def check_emails(config, live_status):
+    """Menghubungkan ke Gmail, memeriksa email baru, dan memprosesnya."""
+    signals_found = []
+    try:
+        live_status.update(Text("Menghubungkan ke Gmail IMAP...", style="cyan"), spinner="dots")
+        mail = imaplib.IMAP4_SSL('imap.gmail.com')
 
-    log_message "Memproses email UID: $uid | Subject: $subject"
-    # echo "DEBUG: Full Content: $full_content" # Uncomment for debugging
+        live_status.update(Text(f"Login sebagai {config['email']}...", style="cyan"), spinner="dots")
+        mail.login(config['email'], config['app_password'])
 
-    # Cek apakah UID ini sudah diproses sebelumnya
-    # if [[ "$uid" == "$last_processed_uid" ]]; then
-    #     log_message "UID $uid sudah diproses sebelumnya, dilewati."
-    #     return 1 # Already processed
-    # fi
+        live_status.update(Text("Memilih folder INBOX...", style="cyan"), spinner="dots")
+        mail.select('inbox')
 
-    # --- Logika Parsing Utama ---
-    # 1. Cari 'Exora AI' (sudah difilter di Python, tapi cek lagi untuk keamanan)
-    if [[ "${full_content,,}" =~ "exora ai" ]]; then # Convert to lowercase for case-insensitive check
-        # 2. Cari kata 'order' (case-insensitive)
-        if [[ "${full_content,,}" =~ order[[:space:]]+([^[:space:]]+) ]]; then
-            # Dapatkan kata setelah 'order'
-            local action="${BASH_REMATCH[1],,}" # Ambil kata setelah order, lowercase
+        # Cari email yang belum dibaca (UNSEEN)
+        live_status.update(Text("Mencari email baru (UNSEEN)...", style="cyan"), spinner="dots")
+        status, messages = mail.search(None, 'UNSEEN')
 
-            log_message "Ditemukan 'order', aksi potensial: '$action'"
-            # echo "DEBUG: Kata setelah 'order': $action" # Uncomment for debugging
+        if status == 'OK':
+            email_ids = messages[0].split()
+            if not email_ids:
+                live_status.update(Text("Tidak ada email baru.", style="green"), spinner="dots")
+                time.sleep(2) # Beri waktu user membaca status
+            else:
+                console.print(f"[bold yellow]Ditemukan {len(email_ids)} email baru.[/bold yellow]")
 
-            # 3. Cek apakah aksinya 'buy' atau 'sell'
-            if [[ "$action" == "buy" ]]; then
-                log_message "Aksi 'BUY' terdeteksi! Memicu notifikasi."
-                trigger_beep "buy"
-                last_processed_uid="$uid" # Tandai sebagai sudah diproses
-                return 0 # Action found
-            elif [[ "$action" == "sell" ]]; then
-                log_message "Aksi 'SELL' terdeteksi! Memicu notifikasi."
-                trigger_beep "sell"
-                last_processed_uid="$uid" # Tandai sebagai sudah diproses
-                return 0 # Action found
-            else
-                log_message "Kata setelah 'order' ('$action') bukan 'buy' atau 'sell'."
-            fi
-        else
-            log_message "Ditemukan 'Exora AI' tapi kata 'order' tidak ditemukan setelahnya."
-        fi
-    else
-         log_message "Pesan tidak mengandung 'Exora AI' (seharusnya sudah difilter Python)."
-    fi
+                for i, email_id in enumerate(email_ids):
+                    current_progress = f"Memproses email {i+1}/{len(email_ids)}"
+                    live_status.update(Text(current_progress, style="cyan"), spinner="dots")
 
-    return 1 # No relevant action found
-}
+                    # Ambil data email (RFC822 = seluruh email)
+                    res, msg_data = mail.fetch(email_id, '(RFC822)')
 
-# Memicu beep berdasarkan aksi
-trigger_beep() {
-    local type="$1"
-    if ! command -v beep >/dev/null 2>&1; then
-        echo "${YELLOW}Notifikasi Suara:${RESET} Perintah 'beep' tidak tersedia."
-        log_message "Notifikasi suara gagal: 'beep' tidak ditemukan."
-        return
-    fi
+                    if res == 'OK':
+                        for response_part in msg_data:
+                            if isinstance(response_part, tuple):
+                                # Parse email dari bytes
+                                msg = email.message_from_bytes(response_part[1])
 
-    echo -n "${CYAN}Memainkan suara untuk $type... ${RESET}"
-    if [ "$type" == "buy" ]; then
-        # Beep panjang 5 detik
-        if ! beep -f "$BEEP_BUY_FREQ" -l "$BEEP_BUY_DURATION"; then
-             echo "${RED}Gagal memainkan beep 'buy'. Cek permission/konfigurasi.${RESET}"
-             log_message "Gagal 'beep' untuk BUY. Error code: $?"
-        else
-             echo "${GREEN}OK${RESET}"
-             log_message "Notifikasi suara BUY berhasil."
-        fi
-    elif [ "$type" == "sell" ]; then
-        # Dua beep pendek dengan jeda
-        local success=true
-        if ! beep -f "$BEEP_SELL_FREQ" -l "$BEEP_SELL_DURATION"; then success=false; fi
-        sleep "$BEEP_SELL_DELAY"
-        if ! beep -f "$BEEP_SELL_FREQ" -l "$BEEP_SELL_DURATION" -D "$BEEP_SELL_DELAY" ; then success=false; fi # Coba pakai delay internal beep jika ada
+                                # Decode subject
+                                subject, encoding = decode_header(msg['Subject'])[0]
+                                if isinstance(subject, bytes):
+                                    subject = subject.decode(encoding if encoding else 'utf-8', errors='ignore')
 
-        if [ "$success" = false ]; then
-             echo "${RED}Gagal memainkan beep 'sell'. Cek permission/konfigurasi.${RESET}"
-             log_message "Gagal 'beep' untuk SELL. Error code: $?"
-        else
-            echo "${GREEN}OK${RESET}"
-            log_message "Notifikasi suara SELL berhasil."
-        fi
-    fi
-}
+                                from_ = msg.get('From')
+                                console.print(f"\n[dim]Membaca email dari:[/dim] {from_} \n[dim]Subject:[/dim] {subject}")
+
+                                # Dapatkan body email (text/plain)
+                                body = get_email_body(msg)
+                                # console.print(f"[dim]Body Preview:[/dim] {body[:100]}...") # Opsi: Tampilkan preview body
+
+                                # Parse untuk sinyal
+                                signal = parse_email_for_signal(subject + " " + body) # Cek subject dan body
+
+                                if signal == "buy":
+                                    signals_found.append("buy")
+                                    beep_buy()
+                                elif signal == "sell":
+                                    signals_found.append("sell")
+                                    beep_sell()
+                                else:
+                                     console.print("[dim]Tidak ada sinyal 'Exora AI' dengan order 'buy'/'sell' ditemukan.[/dim]")
+
+                                # Tandai email sebagai sudah dibaca (SEEN)
+                                try:
+                                     mail.store(email_id, '+FLAGS', '\\Seen')
+                                     # console.print("[dim]Email ditandai sebagai sudah dibaca.[/dim]")
+                                except Exception as e_store:
+                                    console.print(f"[yellow]Warning: Gagal menandai email {email_id} sebagai SEEN: {e_store}[/yellow]")
+                    else:
+                        console.print(f"[yellow]Warning: Gagal fetch email ID {email_id}[/yellow]")
+                    time.sleep(0.5) # Jeda sedikit antar pemrosesan email
+
+        else:
+            console.print(f"[red]Error saat mencari email: {status}[/red]")
+
+        # Logout dari server
+        mail.logout()
+        live_status.update(Text("Logout dari Gmail.", style="cyan"), spinner="dots")
+        time.sleep(1)
+
+    except imaplib.IMAP4.error as e:
+        console.print(f"[bold red]Error IMAP: {e}[/bold red]")
+        live_status.update(Text("Error IMAP. Cek koneksi/credential.", style="red"), spinner="dots")
+        time.sleep(5)
+    except ConnectionRefusedError:
+         console.print("[bold red]Error: Koneksi ke server IMAP ditolak. Firewall?[/bold red]")
+         live_status.update(Text("Koneksi ditolak.", style="red"), spinner="dots")
+         time.sleep(5)
+    except Exception as e:
+        console.print(f"[bold red]Terjadi error tak terduga: {e}[/bold red]")
+        import traceback
+        traceback.print_exc() # Tampilkan detail error untuk debug
+        live_status.update(Text(f"Error: {e}", style="red"), spinner="dots")
+        time.sleep(5)
+
+    return signals_found # Kembalikan daftar sinyal yang ditemukan (jika perlu)
 
 # --- Fungsi Tampilan CLI ---
+def display_homepage():
+    """Menampilkan menu utama."""
+    console.clear()
+    console.print(Panel(
+        "[bold cyan]🚀 Gmail Signal Listener 🚀[/bold cyan]\n\n"
+        "Pilih Opsi:\n"
+        "[1] Mulai Mendengarkan Email\n"
+        "[2] Pengaturan (Email & App Password)\n"
+        "[3] Keluar",
+        title="Main Menu",
+        border_style="blue"
+    ))
+    choice = Prompt.ask("Masukkan pilihan", choices=["1", "2", "3"], default="1")
+    return choice
 
-# Animasi spinner sederhana
-show_spinner() {
-    local pid=$! # Process ID of the previous running command
-    local delay=0.1
-    local spinstr='/-\|'
-    while ps -p $pid > /dev/null; do
-        local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b"
-    done
-    printf "    \b\b\b\b"
-}
+def display_settings(config):
+    """Menampilkan dan mengedit pengaturan."""
+    console.clear()
+    while True:
+        console.print(Panel(
+            f"[bold yellow]🔧 Pengaturan Saat Ini 🔧[/bold yellow]\n\n"
+            f"1. Email Akun Gmail : [cyan]{config['email']}[/cyan]\n"
+            f"2. App Password     : [cyan]{'*' * len(config.get('app_password', '')) if config.get('app_password') else '[Belum Diatur]'}[/cyan]\n"
+            f"3. Interval Cek (dtk): [cyan]{config['check_interval_seconds']}[/cyan]\n\n"
+            "Pilih nomor untuk diedit, [S] untuk Simpan & Kembali, atau [K] untuk Kembali tanpa simpan.",
+            title="Settings",
+            border_style="yellow"
+        ))
+        choice = Prompt.ask("Pilihan Anda", choices=["1", "2", "3", "S", "K", "s", "k"], default="K").upper()
 
-# Fungsi utama untuk mode 'Listen'
-start_listening() {
-    if [ -z "$GMAIL_EMAIL" ] || [ -z "$GMAIL_APP_PASSWORD" ]; then
-        echo "${RED}Error:${RESET} Email atau App Password belum diatur. Silakan atur di menu Settings."
-        read -p "Tekan Enter untuk kembali..."
-        return
-    fi
+        if choice == "1":
+            new_email = Prompt.ask("Masukkan Email Gmail baru", default=config['email'])
+            if "@" in new_email and "." in new_email: # Validasi sederhana
+                 config['email'] = new_email
+            else:
+                 console.print("[red]Format email tidak valid.[/red]")
+                 time.sleep(1)
+        elif choice == "2":
+            console.print("[bold yellow]Masukkan App Password Gmail Anda.[/bold yellow]")
+            console.print("[dim](Input akan tersembunyi. Dapatkan dari: Akun Google > Keamanan > Sandi Aplikasi)[/dim]")
+            new_password = getpass("App Password baru: ")
+            if new_password:
+                config['app_password'] = new_password
+            else:
+                console.print("[yellow]Input password kosong, tidak diubah.[/yellow]")
+                time.sleep(1)
+        elif choice == "3":
+             while True:
+                 try:
+                     new_interval = int(Prompt.ask("Masukkan interval cek email baru (detik)", default=str(config['check_interval_seconds'])))
+                     if new_interval >= 10: # Minimal interval 10 detik
+                         config['check_interval_seconds'] = new_interval
+                         break
+                     else:
+                          console.print("[red]Interval minimal 10 detik.[/red]")
+                 except ValueError:
+                     console.print("[red]Masukkan angka yang valid.[/red]")
+        elif choice == "S":
+            save_config(config)
+            console.print("[green]Pengaturan disimpan![/green]")
+            time.sleep(1)
+            break
+        elif choice == "K":
+            # Reload config jika user batal edit
+            config = load_config()
+            console.print("[yellow]Perubahan dibatalkan.[/yellow]")
+            time.sleep(1)
+            break
+        console.clear() # Refresh tampilan setelah edit
+    return config # Kembalikan config yang mungkin sudah diupdate
 
-    listener_active=true
-    trap 'listener_active=false; echo "\n${YELLOW}Listener dihentikan.${RESET}"; log_message "Listener dihentikan oleh user."; exit' INT TERM # Handle Ctrl+C
+def start_listening(config):
+    """Memulai loop utama untuk memeriksa email secara berkala."""
+    console.clear()
+    console.print(Panel("[bold green]🎧 Memulai Mode Mendengarkan... Tekan Ctrl+C untuk berhenti. 🎧[/bold green]", border_style="green"))
 
-    clear
-    echo "${BLUE}=====================================${RESET}"
-    echo "${BLUE}    Exora AI Email Listener ${CYAN}v1.0${RESET}"
-    echo "${BLUE}=====================================${RESET}"
-    echo "${GREEN}Memulai listener...${RESET} (Tekan Ctrl+C untuk berhenti)"
-    echo "Mengecek email setiap ${YELLOW}${CHECK_INTERVAL}${RESET} detik."
-    echo "Log aktivitas disimpan di: ${CYAN}${LOG_FILE}${RESET}"
-    log_message "Listener dimulai. Interval: $CHECK_INTERVAL detik."
+    if not config.get('email') or config['email'] == DEFAULT_CONFIG['email'] or \
+       not config.get('app_password') or config['app_password'] == DEFAULT_CONFIG['app_password']:
+        console.print("[bold red]Error: Email atau App Password belum diatur dengan benar.[/bold red]")
+        console.print("[yellow]Silakan atur melalui menu 'Pengaturan' terlebih dahulu.[/yellow]")
+        time.sleep(4)
+        return # Kembali ke menu utama
 
-    while $listener_active; do
-        echo -ne "${CYAN}$(date '+%H:%M:%S')${RESET} - Mengecek email... "
-        local email_output
-        # Jalankan pengecekan di background agar spinner bisa jalan
-        run_email_check &
-        local check_pid=$!
-        # Tampilkan spinner selagi menunggu
-        while ps -p $check_pid > /dev/null; do show_spinner; done
-        # Tunggu proses selesai dan dapatkan exit code & output
-        wait $check_pid
-        local exit_code=$?
-        # Ambil output (perlu cara jika output besar, tapi untuk ini harusnya aman)
-        email_output=$(run_email_check) # Panggil lagi untuk ambil output (atau simpan ke file sementara)
+    spinner = Spinner("dots", text=Text("Menunggu...", style="cyan"))
+    try:
+        with Live(spinner, refresh_per_second=10, console=console) as live:
+             while True:
+                live.update(Text(f"Mengecek email setiap {config['check_interval_seconds']} detik...", style="cyan"), spinner="dots")
+                check_emails(config, live) # Pass 'live' object untuk update status
+                # Setelah selesai cek, tampilkan status menunggu
+                for i in range(config['check_interval_seconds'], 0, -1):
+                    live.update(Text(f"Menunggu {i} detik untuk pengecekan berikutnya...", style="blue"), spinner="dots")
+                    time.sleep(1)
 
-        if [ $exit_code -eq 0 ]; then
-            # Ada email baru yang relevan
-            echo "${GREEN}Email baru ditemukan!${RESET} Memproses..."
-            log_message "Email baru ditemukan, memproses..."
-            # Proses email
-            parse_email_data "$email_output"
-            # Tidak perlu sleep jika baru saja memproses, langsung cek lagi mungkin? Atau tetap sleep.
-            sleep "$CHECK_INTERVAL"
-        elif [ $exit_code -eq 2 ]; then
-            # Tidak ada email baru yang relevan
-            echo "${GREEN}Tidak ada email baru yang cocok.${RESET}"
-            sleep "$CHECK_INTERVAL"
-        else
-            # Terjadi error saat cek email
-            echo "${RED}Gagal memeriksa email (Error Code: $exit_code). Coba lagi nanti.${RESET}"
-            log_message "Gagal cek email (Error Code: $exit_code)."
-            sleep $((CHECK_INTERVAL * 2)) # Tunggu lebih lama jika ada error
-        fi
-    done
-}
+    except KeyboardInterrupt:
+        console.print("\n[bold yellow]Interupsi diterima. Menghentikan listener...[/bold yellow]")
+        time.sleep(1)
+    except Exception as e:
+        console.print(f"\n[bold red]Error tak terduga di loop utama: {e}[/bold red]")
+        time.sleep(3)
 
-# Menampilkan menu Settings
-show_settings() {
-    clear
-    echo "${BLUE}--- Pengaturan ---${RESET}"
-    echo "1. Email Gmail      : ${YELLOW}${GMAIL_EMAIL:-Belum diatur}${RESET}"
-    echo "2. App Password     : ${YELLOW}${GMAIL_APP_PASSWORD:+(Tersimpan)}${RESET}" # Jangan tampilkan passwordnya
-    echo "3. Interval Cek (s) : ${YELLOW}${CHECK_INTERVAL}${RESET}"
-    echo "--------------------"
-    echo "4. ${GREEN}Simpan & Kembali${RESET}"
-    echo "5. ${RED}Kembali tanpa menyimpan${RESET}"
-
-    local choice
-    while true; do
-        read -p "Pilih opsi atau nomor item untuk diubah: " choice
-        case $choice in
-            1) read -p "Masukkan Email Gmail baru: " GMAIL_EMAIL ;;
-            2) read -sp "Masukkan Gmail App Password baru: " GMAIL_APP_PASSWORD; echo ;;
-            3) read -p "Masukkan Interval Cek baru (detik): " input_interval
-               # Validasi input adalah angka
-               if [[ "$input_interval" =~ ^[0-9]+$ ]] && [ "$input_interval" -gt 0 ]; then
-                   CHECK_INTERVAL=$input_interval
-               else
-                   echo "${RED}Input tidak valid, harus angka positif.${RESET}"
-               fi
-               ;;
-            4) save_config; break ;;
-            5) load_config > /dev/null # Reload config dari file jika batal
-               echo "${YELLOW}Perubahan dibatalkan.${RESET}"
-               break ;;
-            *) echo "${RED}Pilihan tidak valid.${RESET}" ;;
-        esac
-        # Tampilkan ulang menu setelah perubahan
-        clear
-        echo "${BLUE}--- Pengaturan ---${RESET}"
-        echo "1. Email Gmail      : ${YELLOW}${GMAIL_EMAIL:-Belum diatur}${RESET}"
-        echo "2. App Password     : ${YELLOW}${GMAIL_APP_PASSWORD:+(Tersimpan)}${RESET}"
-        echo "3. Interval Cek (s) : ${YELLOW}${CHECK_INTERVAL}${RESET}"
-        echo "--------------------"
-        echo "4. ${GREEN}Simpan & Kembali${RESET}"
-        echo "5. ${RED}Kembali tanpa menyimpan${RESET}"
-    done
-}
-
-# Menampilkan Homepage / Menu Utama
-display_homepage() {
-    clear
-    echo "${BOLD}${BLUE}"
-    cat << "EOF"
-        _______ __                      ___ __        __  _
-       / ____(_) /____  _________     <  / / /___    / /_(_)___  ____ ____
-      / __/ / / __/ _ \/ ___/ __ \    / / / / / _ \  / __/ / __ \/ __ `/ _ \
-     / /___/ / /_/  __/ /  / / / /   / / / / /  __/ / /_/ / / / / /_/ /  __/
-    /_____/_/\__/\___/_/  /_/ /_/   /_/_/_/_/\___/  \__/_/_/ /_/\__, /\___/
-                                    Exora AI Email Listener   /____/ ${CYAN}v1.0${RESET}
-EOF
-    echo "${RESET}"
-    echo "${GREEN}================ Menu Utama ================${RESET}"
-    echo "${CYAN}1.${RESET} ${BOLD}Mulai Listener${RESET}"
-    echo "${CYAN}2.${RESET} Pengaturan (Email, Password, Interval)"
-    echo "${CYAN}3.${RESET} Lihat Log Aktivitas (${YELLOW}tail -f $LOG_FILE${RESET})"
-    echo "${CYAN}4.${RESET} ${RED}Keluar${RESET}"
-    echo "${GREEN}===========================================${RESET}"
-}
 
 # --- Main Execution ---
+if __name__ == "__main__":
+    config = load_config()
 
-# 1. Pastikan direktori ada
-ensure_dirs
-
-# 2. Cek dependensi
-check_dependencies
-
-# 3. Muat konfigurasi, jika tidak ada, minta input awal
-if ! load_config; then
-    prompt_initial_config
-    # Muat lagi setelah dibuat
-    load_config
-fi
-
-# 4. Loop Menu Utama
-while true; do
-    display_homepage
-    read -p "${BOLD}Pilih opsi [1-4]: ${RESET}" main_choice
-    case $main_choice in
-        1) start_listening ;;
-        2) show_settings ;;
-        3) echo "${YELLOW}Menampilkan log (Tekan Ctrl+C untuk berhenti melihat log):${RESET}"; tail -f "$LOG_FILE"; read -p "Tekan Enter untuk kembali ke menu..." ;;
-        4) echo "${BLUE}Terima kasih telah menggunakan Exora AI Listener!${RESET}"; log_message "Aplikasi ditutup."; exit 0 ;;
-        *) echo "${RED}Pilihan tidak valid. Silakan coba lagi.${RESET}"; sleep 1 ;;
-    esac
-    # Jika listener dihentikan (Ctrl+C), script akan exit, tidak kembali ke sini
-    # Jika kembali dari settings atau log viewer, tunggu sebentar
-    if [[ "$main_choice" != "1" ]]; then
-      # read -p "Tekan Enter untuk kembali ke menu utama..."
-      sleep 0.5 # Jeda singkat sebelum menampilkan menu lagi
-    fi
-done
+    while True:
+        choice = display_homepage()
+        if choice == "1":
+            start_listening(config)
+        elif choice == "2":
+            config = display_settings(config) # Update config jika ada perubahan
+        elif choice == "3":
+            console.print("[bold blue]Terima kasih telah menggunakan script ini! Sampai jumpa! 👋[/bold blue]")
+            sys.exit(0)
