@@ -1,196 +1,294 @@
 #!/bin/bash
 
-# --- Konfigurasi ---
-CHECK_INTERVAL=5 # Detik
-EMAIL_SOURCE_FILE="simulated_emails.txt" # File untuk simulasi email masuk
-BEEP_DURATION=5 # Detik total durasi bip alert
+# --- Konfigurasi Awal & Variabel Global ---
+CONFIG_FILE="email_monitor.conf"
+EMAIL=""
+PASSWORD="" # HARUS GUNAKAN APP PASSWORD GMAIL!
+INTERVAL=5
+SEARCH_TERM="Exora AI"
+LAST_UID="" # Menyimpan UID email terakhir yang diproses
 
-# --- Warna ANSI ---
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+# --- Fungsi Utilitas Tampilan (tput) ---
+# Cek apakah tput tersedia
+if command -v tput >/dev/null 2>&1; then
+    BOLD=$(tput bold)
+    UNDERLINE=$(tput smul)
+    RESET=$(tput sgr0)
+    RED=$(tput setaf 1)
+    GREEN=$(tput setaf 2)
+    YELLOW=$(tput setaf 3)
+    BLUE=$(tput setaf 4)
+    MAGENTA=$(tput setaf 5)
+    CYAN=$(tput setaf 6)
+else
+    # Fallback jika tput tidak ada
+    BOLD=""
+    UNDERLINE=""
+    RESET=""
+    RED=""
+    GREEN=""
+    YELLOW=""
+    BLUE=""
+    MAGENTA=""
+    CYAN=""
+fi
 
-# --- Status ---
-listening_active=false
-last_signal="-"
-last_check_time="-"
-processed_lines=0 # Melacak baris yang sudah diproses di file (simulasi sederhana 'unread')
-
-# --- Fungsi ---
-
-# Cek apakah 'beep' terinstall
-has_beep_command() {
-    command -v beep &> /dev/null
-}
-
-# Fungsi untuk memainkan alert bip
-play_alert_beep() {
-    local start_time=$(date +%s)
-    echo -e "${YELLOW}>>> ALERT! Signal detected! Playing sound... <<<${NC}"
-    if has_beep_command; then
-        # Pola bip on/off dengan command 'beep' (membutuhkan tuning)
-        # Coba 5 kali bip dengan jeda
-        count=0
-        while [[ $(($(date +%s) - start_time)) -lt $BEEP_DURATION && $count -lt 5 ]]; do
-             beep -f 600 -l 400 # Frekuensi 600Hz, durasi 400ms
-             sleep 0.6          # Jeda antar bip
-             ((count++))
-        done
-    else
-        # Fallback jika 'beep' tidak ada: Gunakan bell terminal standar (\a)
-        count=0
-        while [[ $(($(date +%s) - start_time)) -lt $BEEP_DURATION && $count -lt 10 ]]; do
-            echo -ne "\a" # Bunyi bell
-            sleep 0.25    # Jeda singkat 'on'
-            sleep 0.25    # Jeda 'off'
-             ((count++))
-        done
-        echo # Newline setelah selesai bip
-    fi
-    echo -e "${YELLOW}>>> Alert sound finished <<<${NC}"
-}
-
-# Fungsi untuk memeriksa email (dari file simulasi)
-check_emails() {
-    last_check_time=$(date +"%Y-%m-%d %H:%M:%S")
-    local new_signal_found=false
-
-    # Hanya proses baris baru sejak pengecekan terakhir (simulasi sederhana)
-    local current_line_count=$(wc -l < "$EMAIL_SOURCE_FILE" 2>/dev/null || echo 0)
-    if [[ $current_line_count -gt $processed_lines ]]; then
-        # Ada baris baru, proses dari baris setelah processed_lines
-        tail -n +"$(($processed_lines + 1))" "$EMAIL_SOURCE_FILE" | while IFS= read -r line; do
-            ((processed_lines++)) # Tandai baris ini sebagai diproses
-
-            # 1. Cek apakah ada 'Exora AI'
-            if [[ "$line" == *"Exora AI"* ]]; then
-                # 2. Cek apakah ada 'order buy' atau 'order sell'
-                if echo "$line" | grep -q -o 'order buy'; then
-                    last_signal="${GREEN}BUY${NC}"
-                    echo -e "$(date +"%H:%M:%S") - ${GREEN}BUY Signal Detected!${NC} Content: $line"
-                    new_signal_found=true
-                elif echo "$line" | grep -q -o 'order sell'; then
-                    last_signal="${RED}SELL${NC}"
-                    echo -e "$(date +"%H:%M:%S") - ${RED}SELL Signal Detected!${NC} Content: $line"
-                    new_signal_found=true
-                fi
-            fi
-        done
-
-        if $new_signal_found; then
-            play_alert_beep
-        fi
-    fi
-    # Update jumlah baris yang diproses jika file menyusut (misal dihapus manual)
-     processed_lines=$current_line_count
-}
-
-
-# Fungsi untuk menampilkan status
-display_status() {
-    local status_text
-    if $listening_active; then
-        status_text="${GREEN}LISTENING${NC}"
-    else
-        status_text="${RED}IDLE${NC}"
-    fi
-    echo -e "+----------------------------------------------------------+"
-    echo -e "| ${CYAN}Exora AI Signal Listener (Simulation)${NC}"
-    echo -e "+----------------------------------------------------------+"
-    echo -e "| Status         : $status_text"
-    echo -e "| Last Check     : ${YELLOW}$last_check_time${NC}"
-    echo -e "| Last Signal    : $last_signal"
-    echo -e "| Check Interval : ${YELLOW}${CHECK_INTERVAL}s${NC}"
-    echo -e "| Source File    : ${YELLOW}${EMAIL_SOURCE_FILE}${NC}"
-    echo -e "+----------------------------------------------------------+"
-}
-
-# Fungsi untuk menampilkan menu
-display_menu() {
-    echo -e "| ${BLUE}MENU:${NC}"
-    echo -e "| 1. ${GREEN}Start Listening${NC}"
-    echo -e "| 2. ${RED}Stop Listening${NC}"
-    echo -e "| 3. Settings (Not Implemented)"
-    echo -e "| 4. ${YELLOW}Exit${NC}"
-    echo -e "+----------------------------------------------------------+"
-    echo -en "Pilih opsi [1-4]: "
-}
-
-# --- Main Loop ---
-while true; do
+# --- Fungsi Bantuan Tampilan ---
+clear_screen() {
     clear
-    display_status
+}
 
-    if $listening_active; then
-        echo "| ${CYAN}Checking for signals... (Press Ctrl+C to stop immediate check)${NC}"
-        echo -e "+----------------------------------------------------------+"
-        # Lakukan pengecekan non-blokir jika bisa, atau blokir saja
-        check_emails
-        # Tampilkan menu lagi setelah check jika user belum input
-        display_menu & # Jalankan di background agar tidak menunggu input
-        menu_pid=$!
-        # Tunggu interval atau sampai user menekan tombol (dengan timeout)
-        read -t $CHECK_INTERVAL -n 1 -s user_input # -n 1 -s: baca 1 char tanpa echo
-        # Jika user menekan sesuatu, kill proses menu background
-        if [[ $? -eq 0 ]]; then
-             kill $menu_pid &>/dev/null
-             wait $menu_pid &>/dev/null
+print_header() {
+    clear_screen
+    echo "${BLUE}${BOLD}=============================================${RESET}"
+    echo "${BLUE}${BOLD}      ${CYAN}Gmail Monitor for '${SEARCH_TERM}'${RESET}"
+    echo "${BLUE}${BOLD}=============================================${RESET}"
+    echo
+}
+
+print_status() {
+    echo "${CYAN}[*]${RESET} $1"
+}
+
+print_success() {
+    echo "${GREEN}[+]${RESET} $1"
+}
+
+print_warning() {
+    echo "${YELLOW}[!]${RESET} ${BOLD}$1${RESET}"
+}
+
+print_error() {
+    echo "${RED}[-]${RESET} ${BOLD}$1${RESET}"
+}
+
+# --- Fungsi Konfigurasi ---
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # Sumber file konfigurasi dengan aman (mencegah eksekusi perintah)
+        while IFS='=' read -r key value; do
+            # Hapus quote jika ada
+            value="${value%\"}"
+            value="${value#\"}"
+            case "$key" in
+                EMAIL) EMAIL="$value" ;;
+                PASSWORD) PASSWORD="$value" ;;
+                INTERVAL) INTERVAL="$value" ;;
+                SEARCH_TERM) SEARCH_TERM="$value" ;;
+            esac
+        done < "$CONFIG_FILE"
+        print_success "Konfigurasi dimuat dari $CONFIG_FILE"
+    else
+        print_warning "File konfigurasi $CONFIG_FILE tidak ditemukan. Gunakan nilai default atau atur melalui menu."
+    fi
+    # Set default jika kosong setelah load
+    EMAIL="${EMAIL:-"your_email@gmail.com"}"
+    PASSWORD="${PASSWORD:-"YOUR_APP_PASSWORD"}"
+    INTERVAL="${INTERVAL:-5}"
+    SEARCH_TERM="${SEARCH_TERM:-"Exora AI"}"
+}
+
+save_config() {
+    print_status "Menyimpan konfigurasi ke $CONFIG_FILE..."
+    # Pastikan hanya user yang bisa baca/tulis
+    (
+        umask 077 # Hanya izinkan user rwx
+        echo "EMAIL=\"$EMAIL\"" > "$CONFIG_FILE"
+        echo "PASSWORD=\"$PASSWORD\"" >> "$CONFIG_FILE"
+        echo "INTERVAL=\"$INTERVAL\"" >> "$CONFIG_FILE"
+        echo "SEARCH_TERM=\"$SEARCH_TERM\"" >> "$CONFIG_FILE"
+    )
+    if [[ $? -eq 0 ]]; then
+        print_success "Konfigurasi berhasil disimpan."
+    else
+        print_error "Gagal menyimpan konfigurasi. Periksa izin file."
+    fi
+    sleep 1
+}
+
+# --- Fungsi Inti ---
+
+# Fungsi untuk membunyikan alert
+trigger_alert() {
+    local type=$1 # "buy" atau "sell"
+    print_warning "ALERT! Terdeteksi order '${type}' untuk '${SEARCH_TERM}'!"
+    print_warning "Memulai alert beep selama 5 detik..."
+    local end_time=$((SECONDS + 5))
+    while [[ $SECONDS -lt $end_time ]]; do
+        printf '\a' # Bunyikan bell
+        sleep 0.5  # Jeda singkat
+        # Mungkin perlu jeda tambahan agar terdengar hidup-mati
+        # sleep 0.3
+    done
+    print_warning "Alert selesai."
+    sleep 1 # Jeda setelah alert
+}
+
+# Fungsi untuk mem-parsing body email
+parse_email_body() {
+    local body=$1
+    print_status "Memeriksa body email..."
+
+    # 1. Cek apakah mengandung SEARCH_TERM (Exora AI)
+    if echo "$body" | grep -qi "$SEARCH_TERM"; then
+        print_status "Ditemukan '${SEARCH_TERM}'. Mencari kata 'order'..."
+
+        # 2. Cari kata 'order' dan kata setelahnya (buy/sell) - case insensitive
+        # Menggunakan grep -oP (Perl Regex) untuk ekstraksi yang lebih tepat
+        # \K -> Memulai match setelah 'order '
+        # (buy|sell) -> Mencocokkan 'buy' atau 'sell'
+        local action
+        action=$(echo "$body" | grep -oPi "order\s+\K(buy|sell)")
+
+        if [[ -n "$action" ]]; then
+            action_lower=$(echo "$action" | tr '[:upper:]' '[:lower:]') # Konversi ke huruf kecil
+            print_success "Ditemukan trigger: ${BOLD}${action_lower}${RESET}"
+            if [[ "$action_lower" == "buy" ]]; then
+                trigger_alert "buy"
+            elif [[ "$action_lower" == "sell" ]]; then
+                trigger_alert "sell"
+            fi
         else
-            # Timeout tercapai (tidak ada input), lanjutkan loop check
-            kill $menu_pid &>/dev/null
-            wait $menu_pid &>/dev/null
-            continue
+             print_status "Kata 'order' diikuti 'buy' atau 'sell' tidak ditemukan setelah '${SEARCH_TERM}'."
         fi
     else
-         display_menu
-         read user_input
+        # Seharusnya tidak terjadi jika filter curl bekerja, tapi sebagai pengaman
+        print_status "'${SEARCH_TERM}' tidak ditemukan di body email ini."
+    fi
+}
+
+# Fungsi untuk memeriksa email baru
+check_new_email() {
+    print_status "Menghubungkan ke imap.gmail.com (Interval: ${INTERVAL}s)..."
+
+    # Gunakan curl untuk mencari email BARU (UNSEEN) yang mengandung SEARCH_TERM di SUBJECT
+    # Ini lebih efisien daripada mengambil semua email
+    # Kita ambil UID dan BODY-nya
+    local imap_url="imaps://imap.gmail.com:993/INBOX"
+    local search_criteria="SUBJECT \"${SEARCH_TERM}\" UNSEEN" # Cari di Subject dan yang belum dibaca
+
+    # Ambil daftar UID email yang cocok
+    # TODO: Perlu penanganan error koneksi yang lebih baik
+    local uid_list
+    uid_list=$(curl -s --connect-timeout 10 --max-time 15 --url "$imap_url" \
+        --user "$EMAIL:$PASSWORD" \
+        -X "UID SEARCH ${search_criteria}" | grep -oP '\* SEARCH \K.*')
+
+    if [[ -z "$uid_list" ]]; then
+        print_status "Tidak ada email baru yang cocok ditemukan."
+        return # Keluar jika tidak ada email baru
     fi
 
+    print_success "Ditemukan email baru yang cocok! UID: $uid_list"
 
-    case $user_input in
-        1)
-            if ! $listening_active; then
-                # Reset state saat mulai listening
-                last_signal="-"
-                # Cek jumlah baris awal di file agar tidak memproses yang lama
-                processed_lines=$(wc -l < "$EMAIL_SOURCE_FILE" 2>/dev/null || echo 0)
-                listening_active=true
-                echo -e "\n${GREEN}Starting listener...${NC}"
-                sleep 1
-            else
-                echo -e "\n${YELLOW}Already listening.${NC}"
-                sleep 1
-            fi
-            ;;
-        2)
-            if $listening_active; then
-                listening_active=false
-                echo -e "\n${RED}Stopping listener...${NC}"
-                sleep 1
-            else
-                echo -e "\n${YELLOW}Already stopped.${NC}"
-                sleep 1
-            fi
-            ;;
-        3)
-            echo -e "\n${YELLOW}Settings menu is not implemented yet.${NC}"
-            sleep 2
-            ;;
-        4)
-            echo -e "\n${YELLOW}Exiting... Goodbye!${NC}"
-            exit 0
-            ;;
-        *)
-            # Jika input didapat dari read -t saat listening, mungkin kosong atau aneh
-            if [[ -n "$user_input" ]]; then
-                 echo -e "\n${RED}Pilihan tidak valid: [$user_input]. Coba lagi.${NC}"
-                 sleep 1
-            fi
-            ;;
-    esac
-done
+    # Proses setiap UID yang ditemukan
+    local latest_processed_uid=$LAST_UID
+    for uid in $uid_list; do
+        # Hanya proses UID yang lebih besar dari yang terakhir diproses
+        if [[ -z "$LAST_UID" || "$uid" -gt "$LAST_UID" ]]; then
+            print_status "Memproses email dengan UID: $uid"
 
-# --- End of Script ---
+            # Ambil BODY email berdasarkan UID
+            local email_body
+            email_body=$(curl -s --connect-timeout 10 --max-time 15 --url "$imap_url" \
+                         --user "$EMAIL:$PASSWORD" \
+                         -X "UID FETCH $uid BODY[TEXT]") # Ambil bagian teks saja
+
+            if [[ $? -ne 0 || -z "$email_body" ]]; then
+                print_error "Gagal mengambil body email untuk UID: $uid"
+                continue # Lanjut ke UID berikutnya jika gagal
+            fi
+
+            # Bersihkan sedikit body email (opsional, tergantung format asli)
+            # Mungkin perlu penghapusan header atau encoding tertentu
+            # Contoh sederhana: hapus baris awal sampai baris kosong pertama
+             email_body=$(echo "$email_body" | sed '1,/^$/d')
+
+            parse_email_body "$email_body"
+            latest_processed_uid=$uid # Update UID terakhir yang berhasil diproses
+        else
+             print_status "Melewati UID: $uid (sudah diproses atau lebih lama)"
+        fi
+    done
+    LAST_UID=$latest_processed_uid # Simpan UID terakhir yang diproses untuk sesi berikutnya
+}
+
+
+# --- Fungsi Menu ---
+show_settings_menu() {
+    while true; do
+        print_header
+        echo "${YELLOW}${BOLD}--- Pengaturan ---${RESET}"
+        echo "1. Set Email          : ${GREEN}${EMAIL}${RESET}"
+        echo "2. Set App Password   : ${GREEN}${PASSWORD:0:1}***${PASSWORD: -1:1}${RESET} ${RED}(Sangat Tidak Aman!)${RESET}"
+        echo "3. Set Interval (detik): ${GREEN}${INTERVAL}${RESET}"
+        echo "4. Set Teks Pencarian : ${GREEN}${SEARCH_TERM}${RESET}"
+        echo "5. ${YELLOW}Simpan & Kembali${RESET}"
+        echo
+        read -rp "${BOLD}Pilih opsi (1-5): ${RESET}" choice
+
+        case $choice in
+            1) read -rp "Masukkan Email Gmail baru: " EMAIL ;;
+            2) read -rsp "Masukkan ${BOLD}App Password${RESET} Gmail baru: " PASSWORD; echo ;;
+            3) read -rp "Masukkan Interval cek baru (detik): " INTERVAL ;;
+            4) read -rp "Masukkan Teks Pencarian baru (di Subject/Body): " SEARCH_TERM ;;
+            5) save_config; return ;;
+            *) print_error "Pilihan tidak valid!" ; sleep 1 ;;
+        esac
+         # Validasi input (opsional)
+        if [[ "$choice" == "3" && ! "$INTERVAL" =~ ^[0-9]+$ ]]; then
+            print_error "Interval harus berupa angka!"
+            INTERVAL=5 # Reset ke default jika salah
+            sleep 1
+        fi
+    done
+}
+
+show_main_menu() {
+    while true; do
+        print_header
+        echo "${MAGENTA}${BOLD}--- Menu Utama ---${RESET}"
+        echo "1. ${GREEN}Mulai Monitoring${RESET}"
+        echo "2. ${YELLOW}Pengaturan${RESET}"
+        echo "3. ${RED}Keluar${RESET}"
+        echo
+        echo "${CYAN}Status:${RESET}"
+        echo "  Email    : ${GREEN}${EMAIL}${RESET}"
+        echo "  Interval : ${GREEN}${INTERVAL} detik${RESET}"
+        echo "  Cari Teks: ${GREEN}${SEARCH_TERM}${RESET}"
+        echo "  ${YELLOW}Password : ${RED}Disembunyikan (Gunakan App Password!)${RESET}"
+        echo
+        read -rp "${BOLD}Pilih opsi (1-3): ${RESET}" choice
+
+        case $choice in
+            1) start_monitoring ;;
+            2) show_settings_menu ;;
+            3) print_header; print_status "Keluar..."; exit 0 ;;
+            *) print_error "Pilihan tidak valid!"; sleep 1 ;;
+        esac
+    done
+}
+
+start_monitoring() {
+    print_header
+    print_warning "Memulai monitoring email setiap ${INTERVAL} detik..."
+    print_warning "Tekan ${BOLD}Ctrl+C${RESET} untuk berhenti."
+    echo
+
+    # Reset LAST_UID saat monitoring dimulai ulang
+    LAST_UID=""
+    # Lakukan cek awal sekali
+    check_new_email
+
+    # Loop utama monitoring
+    while true; do
+        sleep "$INTERVAL"
+        check_new_email
+    done
+}
+
+# --- Main Execution ---
+trap 'echo; print_error "Monitoring dihentikan oleh user."; exit 1' SIGINT SIGTERM # Handle Ctrl+C
+
+load_config # Muat konfigurasi saat script dimulai
+show_main_menu # Tampilkan menu utama
