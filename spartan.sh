@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Script Email Listener & Binance Trader
-# Versi: 1.7 (Logging Aktif - Limit 15 Baris)
+# Versi: 1.8 (Real-time Log Teks Biasa)
 # Author: [Nama Kamu/AI] & Kontributor
 
 # --- Konfigurasi Awal ---
@@ -24,14 +24,14 @@ SCRIPT_MAIN_PID=$$ # Simpan PID script utama
 
 # --- Fungsi ---
 
-# Fungsi untuk menampilkan pesan error dengan dialog
+# Fungsi untuk menampilkan pesan error dengan dialog (kecuali untuk show_live_log)
 error_msg() {
     clear
     dialog --title "Error" --msgbox "$1" 8 60
     log_message "ERROR_DIALOG: $1" # Tetap log pesan error
 }
 
-# Fungsi untuk menampilkan info dengan dialog
+# Fungsi untuk menampilkan info dengan dialog (kecuali untuk show_live_log)
 info_msg() {
     clear
     dialog --title "Info" --msgbox "$1" 8 60
@@ -41,7 +41,8 @@ info_msg() {
 check_deps() {
     local missing_deps=()
     # Tambahkan jq untuk parsing JSON response Binance
-    for cmd in dialog neomutt curl openssl jq grep sed awk cut date mktemp tail wc kill sleep clear pgrep wc; do # Tambahkan 'wc'
+    # Pastikan 'tail' ada (sekarang krusial untuk show_live_log)
+    for cmd in dialog neomutt curl openssl jq grep sed awk cut date mktemp tail wc kill sleep clear pgrep wc; do
         if ! command -v "$cmd" &> /dev/null; then
             missing_deps+=("$cmd")
         fi
@@ -94,7 +95,7 @@ save_config() {
     mkdir -p "$(dirname "$CONFIG_FILE")"
     rm -f "$CONFIG_FILE"
     {
-        echo "# Konfigurasi Email Trader (v1.7 - Log Aktif)"
+        echo "# Konfigurasi Email Trader (v1.8 - Log Teks Biasa)"
         echo "GMAIL_USER='${GMAIL_USER}'"
         echo "GMAIL_APP_PASS='${GMAIL_APP_PASS}'"
         echo "BINANCE_API_KEY='${BINANCE_API_KEY}'"
@@ -224,9 +225,11 @@ check_email() {
         else
              log_message "Action tidak ditemukan atau gagal parse/eksekusi, email TIDAK ditandai dibaca."
         fi
+        # rm -f "$email_body_file" # Dihapus oleh trap
         return 0
     else
         # log_message "Tidak ada email baru yang cocok ditemukan." # Tidak perlu log jika tidak ada email
+        # rm -f "$email_body_file" # Dihapus oleh trap
         return 1
     fi
 }
@@ -298,7 +301,7 @@ execute_binance_order() {
 
     local api_endpoint="https://api.binance.com"
     local order_path="/api/v3/order"
-    # Pastikan parameter timestamp ditulis dengan benar (sebelumnya ada typo 'Ã—tamp')
+    # Perbaiki parameter timestamp, seharusnya 'timestamp=' bukan '×tamp='
     local params="symbol=${symbol}&side=${side}&type=MARKET&quantity=${quantity}×tamp=${timestamp}"
     local signature
     signature=$(generate_binance_signature "$params" "$BINANCE_SECRET_KEY")
@@ -376,34 +379,24 @@ listener_loop() {
         sleep "$check_interval"
 
         # --- Log Trimming ---
-        # Cek hanya jika file log ada dan punya isi
         if [[ -f "$LOG_FILE" && -s "$LOG_FILE" ]]; then
             local line_count
-            # Hitung baris (lebih efisien dari cat | wc -l)
             line_count=$(wc -l < "$LOG_FILE")
-
-            # Jika jumlah baris melebihi batas
             if [[ "$line_count" -gt "$MAX_LOG_LINES" ]]; then
                 log_message "LOG_TRIM: Log melebihi $MAX_LOG_LINES baris ($line_count). Memangkas..."
                 local temp_log_file
-                # Buat file temporary
                 temp_log_file=$(mktemp) || {
                     log_message "ERROR_LOG_TRIM: Gagal membuat file log temporary."
-                    continue # Lewati pemangkasan kali ini
+                    continue
                 }
-                # Ambil N baris terakhir dan simpan ke file temporary
                 tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "$temp_log_file"
-
-                # Pastikan tail berhasil dan file temp tidak kosong sebelum menimpa
                 if [[ -s "$temp_log_file" ]]; then
-                    # Timpa file log asli dengan file temporary
                     mv "$temp_log_file" "$LOG_FILE"
-                    # Setel ulang permission (mv mungkin mengubahnya)
                     chmod 600 "$LOG_FILE"
                     log_message "LOG_TRIM: Log berhasil dipangkas menjadi ${MAX_LOG_LINES} baris."
                 else
                     log_message "ERROR_LOG_TRIM: Gagal memangkas log (tail menghasilkan file kosong?). File asli tidak diubah."
-                    rm -f "$temp_log_file" # Hapus file temp yang gagal/kosong
+                    rm -f "$temp_log_file"
                 fi
             fi
         fi
@@ -421,7 +414,6 @@ is_listener_running() {
             LISTENER_PID="$pid"
             return 0 # Listener berjalan
         else
-            # File PID ada tapi proses tidak jalan -> file basi
             log_message "INFO: File PID ($PID_FILE) ditemukan tapi proses $pid tidak berjalan. Menghapus file PID basi."
             rm -f "$PID_FILE"
             LISTENER_PID=""
@@ -441,7 +433,6 @@ start_listener() {
 
     if ! load_config; then
         error_msg "Konfigurasi belum lengkap atau gagal dimuat. Tidak bisa memulai listener."
-        # Tawarkan konfigurasi jika belum ada
         if ! [[ -f "$CONFIG_FILE" ]]; then
              info_msg "Silakan jalankan 'Pengaturan' dari menu utama terlebih dahulu."
         fi
@@ -449,29 +440,23 @@ start_listener() {
     fi
 
     log_message "Memulai listener di background..."
-    # Redirect stdout & stderr listener ke $LOG_FILE
-    # Jalankan listener_loop dalam subshell agar variabel diekspor
     ( listener_loop ) >>"$LOG_FILE" 2>&1 &
     local pid=$!
 
-    # Simpan PID ke file
     echo "$pid" > "$PID_FILE"
     if [ $? -ne 0 ]; then
        log_message "ERROR: Gagal menyimpan PID $pid ke $PID_FILE."
-       # Coba bunuh proses yang mungkin sudah jalan
        kill "$pid" 2>/dev/null
        error_msg "Gagal menyimpan file PID. Listener tidak dimulai."
        LISTENER_PID=""
        return 1
     fi
 
-    # Beri waktu sejenak untuk proses dimulai
     sleep 0.5
-    # Verifikasi apakah proses benar-benar berjalan
     if ! kill -0 "$pid" 2>/dev/null; then
         log_message "ERROR: Listener process (PID: $pid) tidak ditemukan setelah dimulai. Cek $LOG_FILE untuk error."
         error_msg "Listener gagal dimulai atau langsung berhenti. Cek log di $LOG_FILE."
-        rm -f "$PID_FILE" # Hapus file PID jika proses gagal
+        rm -f "$PID_FILE"
         LISTENER_PID=""
         return 1
     fi
@@ -489,36 +474,29 @@ stop_listener() {
     fi
 
     log_message "Mengirim sinyal TERM ke listener (PID: $LISTENER_PID)..."
-    # Kirim sinyal TERM (graceful shutdown)
     if kill -TERM "$LISTENER_PID" 2>/dev/null; then
         local count=0
-        local max_wait=10 # Tunggu maksimal 5 detik (10 * 0.5s)
-        # Tunggu proses berhenti
+        local max_wait=10
         while kill -0 "$LISTENER_PID" 2>/dev/null; do
             ((count++))
             if [ "$count" -gt "$max_wait" ]; then
                 log_message "WARNING: Listener (PID: $LISTENER_PID) tidak berhenti setelah ${max_wait} setengah detik. Mengirim sinyal KILL."
-                # Paksa berhenti jika tidak mau berhenti baik-baik
                 kill -KILL "$LISTENER_PID" 2>/dev/null
-                sleep 0.5 # Beri waktu sedikit setelah KILL
+                sleep 0.5
                 break
             fi
             sleep 0.5
         done
 
-        # Cek lagi apakah sudah berhenti
         if ! kill -0 "$LISTENER_PID" 2>/dev/null; then
             log_message "Listener (PID: $LISTENER_PID) berhasil dihentikan."
             info_msg "Listener (PID: $LISTENER_PID) berhasil dihentikan."
         else
             log_message "ERROR: Gagal menghentikan listener (PID: $LISTENER_PID) sepenuhnya bahkan setelah KILL."
             error_msg "Gagal menghentikan listener (PID: $LISTENER_PID) sepenuhnya."
-            # Jangan hapus PID file jika gagal stop total? Mungkin lebih baik tetap dihapus.
-            # return 1 # Mungkin tidak perlu return error jika sudah di-KILL
         fi
     else
         log_message "WARNING: Gagal mengirim sinyal TERM ke PID $LISTENER_PID (mungkin sudah berhenti?)."
-        # Cek apakah memang sudah berhenti
         if ! kill -0 "$LISTENER_PID" 2>/dev/null; then
             info_msg "Listener (PID: $LISTENER_PID) sepertinya sudah berhenti."
         else
@@ -527,32 +505,83 @@ stop_listener() {
         fi
     fi
 
-    # Hapus file PID setelah proses berhenti atau dipastikan tidak berjalan
     rm -f "$PID_FILE"
     LISTENER_PID=""
     return 0
 }
 
-# Menampilkan log real-time (jika listener berjalan)
+# ================================================================
+# MODIFIED: Menampilkan log real-time sebagai teks biasa
+# ================================================================
 show_live_log() {
     if ! is_listener_running; then
-        error_msg "Listener tidak sedang berjalan. Tidak ada log real-time untuk ditampilkan."
+        # Gunakan echo untuk pesan error sederhana, tanpa dialog
+        clear
+        echo "======================================================"
+        echo " ERROR: Listener Tidak Aktif"
+        echo "======================================================"
+        echo " Listener tidak sedang berjalan."
+        echo " Tidak ada log real-time untuk ditampilkan."
+        echo ""
+        echo " Tekan Enter untuk kembali ke menu..."
+        read -r # Tunggu user menekan Enter
+        log_message "Percobaan lihat log real-time gagal: Listener tidak aktif."
         return 1
     fi
-     if [[ ! -f "$LOG_FILE" ]]; then
-        error_msg "File log ($LOG_FILE) tidak ditemukan."
+     if [[ ! -f "$LOG_FILE" || ! -r "$LOG_FILE" ]]; then
+        # Gunakan echo untuk pesan error sederhana, tanpa dialog
+        clear
+        echo "======================================================"
+        echo " ERROR: File Log Tidak Ditemukan/Dibaca"
+        echo "======================================================"
+        echo " File log ($LOG_FILE)"
+        echo " tidak ditemukan atau tidak dapat dibaca."
+        echo ""
+        echo " Tekan Enter untuk kembali ke menu..."
+        read -r
+        log_message "Percobaan lihat log real-time gagal: File log $LOG_FILE tidak ditemukan/dibaca."
         return 1
      fi
-     clear
-     dialog --title "Email Listener - Log Real-time (PID: $LISTENER_PID)" \
-            --no-kill \
-            --cr-wrap \
-            --tailboxbg "$LOG_FILE" 25 90
-     log_message "Menutup tampilan log real-time (listener tetap berjalan)."
-     clear
-}
 
-# Menampilkan isi file log statis
+     clear
+     # Pesan Header
+     echo "================================================================================"
+     echo " Menampilkan Log Real-time Email Listener (PID: $LISTENER_PID)"
+     echo "================================================================================"
+     echo " Log File : $LOG_FILE"
+     echo " Tampilan : Otomatis scroll, maks ${MAX_LOG_LINES} baris akan disimpan di file."
+     echo " Keluar   : Tekan Ctrl+C untuk berhenti melihat log & kembali ke menu."
+     echo "--------------------------------------------------------------------------------"
+
+     # Tampilkan beberapa baris terakhir saat pertama kali dibuka agar tidak kosong
+     if [[ -s "$LOG_FILE" ]]; then
+         echo "[Menampilkan ${MAX_LOG_LINES} baris terakhir log yang sudah ada...]"
+         tail -n "$MAX_LOG_LINES" "$LOG_FILE" # Tampilkan sesuai batas log
+         echo "--------------------------------------------------------------------------------"
+         echo "[Mengikuti pembaruan log secara real-time...]"
+     else
+         echo "[File log kosong. Menunggu entri log baru...]"
+         echo "--------------------------------------------------------------------------------"
+     fi
+
+     # Gunakan tail -f untuk menampilkan log secara real-time
+     # Trap Ctrl+C akan menghentikan tail -f dan melanjutkan eksekusi script di bawahnya
+     tail -f "$LOG_FILE"
+
+     # Kode ini akan berjalan SETELAH user menekan Ctrl+C untuk menghentikan 'tail -f'
+     echo # Baris baru setelah output tail berhenti
+     echo "--------------------------------------------------------------------------------"
+     echo "Berhenti melihat log real-time."
+     echo "Tekan Enter untuk kembali ke menu utama..."
+     read -r # Beri jeda agar user bisa membaca pesan sebelum menu muncul lagi
+     # Tidak perlu log_message di sini karena user sengaja keluar dari tampilan log
+     # Clear akan dilakukan oleh loop main_menu sebelum menampilkan menu lagi
+}
+# ================================================================
+# AKHIR MODIFIKASI show_live_log
+# ================================================================
+
+# Menampilkan isi file log statis (tetap menggunakan dialog)
 view_static_log() {
     clear
     if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
@@ -594,8 +623,9 @@ main_menu() {
             local list_height=4
         fi
 
+        # Gunakan dialog untuk menu utama
         CHOICE=$(dialog --clear --stdout \
-                        --title "Email Trader v1.7 - Menu Utama$listener_status_msg" \
+                        --title "Email Trader v1.8 - Menu Utama$listener_status_msg" \
                         --cancel-label "Keluar" \
                         --menu "Pilih tindakan (Log: $LOG_FILE):" $menu_height 75 $list_height "${menu_items[@]}")
 
@@ -607,7 +637,7 @@ main_menu() {
 
         if [[ -n "$LISTENER_PID" ]]; then # === Listener Aktif ===
             case "$CHOICE" in
-                1) show_live_log ;;
+                1) show_live_log ;; # Panggil fungsi log real-time yang baru
                 2) stop_listener ;;
                 3) error_msg "Listener harus dihentikan terlebih dahulu untuk mengakses Pengaturan." ;;
                 4) view_static_log ;;
@@ -635,8 +665,8 @@ main_menu() {
                 *) error_msg "Pilihan tidak valid." ;;
             esac
         fi
-        # Beri jeda sedikit sebelum menampilkan menu lagi, kecuali jika keluar
-        [[ "$CHOICE" != "Keluar_Signal" ]] && sleep 0.1
+        # Tidak perlu sleep di sini, karena 'read -r' di show_live_log sudah memberi jeda
+        # atau dialog di fungsi lain juga memberi jeda alami.
     done
 }
 
@@ -648,45 +678,45 @@ cleanup() {
     echo
     log_message "--- Script Menerima Sinyal Exit (Kode: $exit_code) ---"
     local current_pid=""
-    # Cek apakah listener sedang berjalan berdasarkan PID file
     if [ -f "$PID_FILE" ]; then current_pid=$(cat "$PID_FILE"); fi
 
-    # Jika PID ada dan prosesnya masih berjalan
     if [[ -n "$current_pid" ]] && kill -0 "$current_pid" 2>/dev/null; then
         echo " Membersihkan: Menghentikan listener (PID: $current_pid) sebelum keluar..."
         log_message "Cleanup: Mengirim TERM ke listener PID $current_pid..."
         kill -TERM "$current_pid" &> /dev/null
-        sleep 0.5 # Beri waktu sedikit
-        # Jika masih jalan, paksa KILL
+        sleep 0.5
         if kill -0 "$current_pid" &> /dev/null; then
            log_message "Cleanup: Listener PID $current_pid tidak berhenti, mengirim KILL."
            kill -KILL "$current_pid" &> /dev/null
         fi
-        rm -f "$PID_FILE" # Hapus file PID
+        rm -f "$PID_FILE"
         echo " Membersihkan: Listener dihentikan."
         log_message "Cleanup: Listener (PID: $current_pid) dihentikan paksa saat script exit."
     elif [[ -f "$PID_FILE" ]]; then
-         # Jika file PID ada tapi proses tidak jalan
          rm -f "$PID_FILE"
          log_message "Cleanup: Menghapus file PID basi ($PID_FILE)."
     fi
     echo " Script selesai."
-    stty sane # Kembalikan terminal ke state normal jika dialog mengacaukannya
+    stty sane # Kembalikan terminal ke state normal jika dialog/tail mengacaukannya
     clear
     # Keluar dengan kode yang sesuai
-    if [[ "$exit_code" == "0" ]]; then exit 0; else exit $((128 + exit_code)); fi
+    # Jika exit codenya 0 (normal exit atau Ctrl+C di menu utama), keluar 0.
+    # Jika dari sinyal lain, gunakan konvensi 128 + sinyal.
+    # Ctrl+C (SIGINT=2) di tail -f akan menyebabkan exit_code=130 di sini jika trap utama menangkapnya,
+    # tapi karena tail yang dihentikan, script utama harusnya tidak exit dengan kode ini.
+    # Kita set exit 0 jika kodenya 0 atau 130 (indikasi Ctrl+C yang tertangkap trap)
+    if [[ "$exit_code" == "0" || "$exit_code" == "130" ]]; then exit 0; else exit $exit_code; fi
 }
-# Pasang trap untuk sinyal INT (Ctrl+C) dan TERM (kill)
-trap cleanup INT TERM EXIT # EXIT juga akan trigger cleanup pada akhir normal
+# Pasang trap untuk sinyal INT (Ctrl+C) dan TERM (kill), juga EXIT
+trap cleanup INT TERM EXIT
 
 # --- Inisialisasi ---
 clear
-echo "Memulai Email Trader v1.7 (Logging Aktif - Max $MAX_LOG_LINES baris)..."
+echo "Memulai Email Trader v1.8 (Log Teks Biasa - Max $MAX_LOG_LINES baris)..."
 check_deps # Cek dependensi dulu
-log_message "--- Script Email Trader v1.7 Dimulai (PID: $SCRIPT_MAIN_PID) ---"
+log_message "--- Script Email Trader v1.8 Dimulai (PID: $SCRIPT_MAIN_PID) ---"
 log_message "Log disimpan di: $LOG_FILE"
 
-# Cek apakah ada listener dari sesi sebelumnya yang masih jalan
 is_listener_running
 if [[ -n "$LISTENER_PID" ]]; then
     log_message "INFO: Script dimulai, listener dari sesi sebelumnya terdeteksi aktif (PID: $LISTENER_PID)."
@@ -694,9 +724,8 @@ if [[ -n "$LISTENER_PID" ]]; then
     sleep 2
 fi
 
-# Cek konfigurasi, tawarkan setup jika belum ada DAN listener tidak aktif
 if ! load_config; then
-    if ! is_listener_running; then # Hanya tawarkan setup jika listener TIDAK aktif
+    if ! is_listener_running; then
         clear
         dialog --title "Setup Awal Diperlukan" \
             --yesno "File konfigurasi ($CONFIG_FILE) tidak ditemukan atau tidak lengkap.\n\nApakah Anda ingin melakukan konfigurasi sekarang?" 10 70
@@ -709,7 +738,6 @@ if ! load_config; then
                     log_message "FATAL: Konfigurasi awal gagal/dibatalkan. Script berhenti."
                     exit 1
                 fi
-                # Coba load lagi setelah konfigurasi
                 if ! load_config; then
                     clear
                     echo "Gagal memuat konfigurasi bahkan setelah setup awal. Script berhenti."
@@ -725,7 +753,6 @@ if ! load_config; then
                 ;;
         esac
     else
-        # Konfigurasi gagal load TAPI listener aktif (dari sesi lalu)
         log_message "WARNING: Konfigurasi gagal dimuat, tapi listener (PID: $LISTENER_PID) aktif."
         error_msg "WARNING: Konfigurasi gagal dimuat ($CONFIG_FILE).\nListener dari sesi sebelumnya mungkin berjalan dengan konfigurasi lama.\nHentikan listener dan perbaiki/buat konfigurasi jika perlu."
         sleep 3
