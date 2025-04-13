@@ -1,381 +1,444 @@
 import imaplib
 import email
 from email.header import decode_header
-import json
 import time
+import subprocess
+import json
 import os
+import getpass
 import sys
-import re # Untuk parsing yang lebih fleksibel
-import winsound # Hanya untuk Windows!
-from getpass import getpass # Untuk input password tersembunyi
+import signal # Untuk menangani Ctrl+C
 
-# Rich untuk CLI yang lebih baik
+# Import Rich untuk tampilan CLI yang lebih baik
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
-from rich.live import Live
-from rich.spinner import Spinner
 from rich.text import Text
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich import print as rprint # Menggunakan print dari rich
 
-# Inisialisasi Console Rich
-console = Console()
-
-CONFIG_FILE = 'config.json'
-DEFAULT_CONFIG = {
-    "email": "MASUKKAN_EMAIL_ANDA@gmail.com",
-    "app_password": "MASUKKAN_APP_PASSWORD_ANDA",
-    "check_interval_seconds": 60
+CONSOLE = Console()
+CONFIG_FILE = "config.json"
+DEFAULT_SETTINGS = {
+    "email_address": "",
+    "app_password": "",
+    "imap_server": "imap.gmail.com",
+    "check_interval_seconds": 60, # Periksa email setiap 60 detik
+    "target_keyword": "Exora AI",
+    "trigger_keyword": "order",
 }
 
-# --- Fungsi Konfigurasi ---
-def load_config():
-    """Memuat konfigurasi dari file JSON."""
-    if not os.path.exists(CONFIG_FILE):
-        console.print(f"[yellow]File konfigurasi '{CONFIG_FILE}' tidak ditemukan. Membuat default.[/yellow]")
-        save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG
-    try:
-        with open(CONFIG_FILE, 'r') as f:
-            config = json.load(f)
-            # Pastikan semua kunci ada
-            for key, value in DEFAULT_CONFIG.items():
-                if key not in config:
-                    config[key] = value
-            return config
-    except json.JSONDecodeError:
-        console.print(f"[bold red]Error: Format file '{CONFIG_FILE}' tidak valid. Menggunakan default.[/bold red]")
-        # Mungkin backup file lama dan buat yang baru
-        # os.rename(CONFIG_FILE, CONFIG_FILE + '.bak')
-        save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG
-    except Exception as e:
-        console.print(f"[bold red]Error saat memuat konfigurasi: {e}. Menggunakan default.[/bold red]")
-        return DEFAULT_CONFIG
+# Variabel global untuk mengontrol loop utama
+running = True
 
-def save_config(config):
-    """Menyimpan konfigurasi ke file JSON."""
+# --- Fungsi Penanganan Sinyal (Ctrl+C) ---
+def signal_handler(sig, frame):
+    """Menangani sinyal SIGINT (Ctrl+C) untuk keluar dengan bersih."""
+    global running
+    CONSOLE.print("\n[bold yellow]Keluar dari program...[/bold yellow]")
+    running = False
+    # Beri sedikit waktu agar loop utama bisa berhenti
+    time.sleep(1)
+    # Keluar paksa jika masih berjalan setelah jeda (misalnya jika terjebak di login)
+    sys.exit(0)
+
+# Daftarkan signal handler
+signal.signal(signal.SIGINT, signal_handler)
+
+# --- Fungsi Konfigurasi ---
+def load_settings():
+    """Memuat pengaturan dari file JSON."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                settings = json.load(f)
+                # Pastikan semua kunci default ada
+                for key, value in DEFAULT_SETTINGS.items():
+                    if key not in settings:
+                        settings[key] = value
+                return settings
+        except json.JSONDecodeError:
+            CONSOLE.print(f"[bold red]Error:[/bold red] File konfigurasi '{CONFIG_FILE}' rusak. Menggunakan default.")
+            return DEFAULT_SETTINGS.copy()
+        except Exception as e:
+            CONSOLE.print(f"[bold red]Error saat memuat konfigurasi:[/bold red] {e}")
+            return DEFAULT_SETTINGS.copy()
+    else:
+        return DEFAULT_SETTINGS.copy()
+
+def save_settings(settings):
+    """Menyimpan pengaturan ke file JSON."""
     try:
         with open(CONFIG_FILE, 'w') as f:
-            json.dump(config, f, indent=4)
-        # console.print(f"[green]Konfigurasi disimpan ke '{CONFIG_FILE}'[/green]")
+            json.dump(settings, f, indent=4)
+        rprint(f"[green]Pengaturan berhasil disimpan ke '{CONFIG_FILE}'[/green]")
     except Exception as e:
-        console.print(f"[bold red]Error saat menyimpan konfigurasi: {e}[/bold red]")
+        CONSOLE.print(f"[bold red]Error saat menyimpan konfigurasi:[/bold red] {e}")
 
-# --- Fungsi Beep (Windows Specific) ---
-def beep_buy():
-    """Memainkan suara beep untuk sinyal BUY (5 detik on/off)."""
-    console.print("[bold green]>>> BUY Signal Detected! Playing sound... <<<[/bold green]")
-    frequency = 1000  # Hz
-    duration_on = 500  # milliseconds
-    duration_off = 500 # milliseconds
-    start_time = time.time()
-    while time.time() - start_time < 5: # Loop selama 5 detik
-        try:
-            winsound.Beep(frequency, duration_on)
-            time.sleep(duration_off / 1000.0) # Sleep butuh detik
-        except RuntimeError:
-             console.print("[yellow]Tidak bisa memainkan suara (mungkin tidak ada sound device?).[/yellow]")
-             break # Keluar jika error
-        except Exception as e:
-             console.print(f"[red]Error saat beep: {e}[/red]")
-             break
+# --- Fungsi Utilitas ---
+def clear_screen():
+    """Membersihkan layar konsol."""
+    os.system('cls' if os.name == 'nt' else 'clear')
 
-def beep_sell():
-    """Memainkan suara beep untuk sinyal SELL (2 kali beep dalam 5 detik)."""
-    console.print("[bold red]>>> SELL Signal Detected! Playing sound... <<<[/bold red]")
-    frequency = 1500  # Hz (beda frekuensi biar beda)
-    duration = 1000  # milliseconds (1 detik beep)
-    try:
-        winsound.Beep(frequency, duration)
-        time.sleep(0.5) # Jeda antar beep
-        winsound.Beep(frequency, duration)
-    except RuntimeError:
-         console.print("[yellow]Tidak bisa memainkan suara (mungkin tidak ada sound device?).[/yellow]")
-    except Exception as e:
-         console.print(f"[red]Error saat beep: {e}[/red]")
-
-
-# --- Fungsi Email ---
-def clean_text(text):
-    """Membersihkan teks dari karakter aneh dan spasi berlebih."""
-    if text is None:
+def decode_mime_words(s):
+    """Mendekode header email yang mungkin terenkode."""
+    if not s:
         return ""
-    # Hapus spasi berlebih dan ganti newline dengan spasi
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    decoded_parts = decode_header(s)
+    result = []
+    for part, encoding in decoded_parts:
+        if isinstance(part, bytes):
+            result.append(part.decode(encoding or 'utf-8', errors='ignore'))
+        else:
+            result.append(part)
+    return "".join(result)
 
-def get_email_body(msg):
-    """Mendapatkan body teks dari objek email, menangani multipart."""
-    body = ""
+def get_text_from_email(msg):
+    """Mengekstrak konten teks dari objek email (menangani multipart)."""
+    text_content = ""
     if msg.is_multipart():
         for part in msg.walk():
             content_type = part.get_content_type()
             content_disposition = str(part.get("Content-Disposition"))
 
-            # Cari bagian text/plain, abaikan attachment
+            # Cari bagian teks plain, abaikan lampiran
             if content_type == "text/plain" and "attachment" not in content_disposition:
                 try:
-                    # Coba decode payload
-                    charset = part.get_content_charset()
+                    charset = part.get_content_charset() or 'utf-8'
                     payload = part.get_payload(decode=True)
-                    if payload:
-                        body = payload.decode(charset if charset else 'utf-8', errors='ignore')
-                        break # Ambil body text/plain pertama saja
+                    text_content += payload.decode(charset, errors='ignore')
                 except Exception as e:
-                    console.print(f"[yellow]Warning: Tidak bisa decode bagian email: {e}[/yellow]")
-                    # Coba ambil payload mentah jika decode gagal
-                    raw_payload = part.get_payload()
-                    if isinstance(raw_payload, str):
-                         body = raw_payload # Anggap saja sudah string
-                         break
-
-    else: # Email bukan multipart
+                    CONSOLE.print(f"[yellow]Warning:[/yellow] Tidak bisa mendekode bagian email: {e}")
+    else:
+        # Email bukan multipart, coba ambil body langsung
         content_type = msg.get_content_type()
         if content_type == "text/plain":
-             try:
-                charset = msg.get_content_charset()
+            try:
+                charset = msg.get_content_charset() or 'utf-8'
                 payload = msg.get_payload(decode=True)
-                if payload:
-                    body = payload.decode(charset if charset else 'utf-8', errors='ignore')
-             except Exception as e:
-                console.print(f"[yellow]Warning: Tidak bisa decode body email non-multipart: {e}[/yellow]")
-                raw_payload = msg.get_payload()
-                if isinstance(raw_payload, str):
-                     body = raw_payload
+                text_content = payload.decode(charset, errors='ignore')
+            except Exception as e:
+                 CONSOLE.print(f"[yellow]Warning:[/yellow] Tidak bisa mendekode body email: {e}")
 
-    return clean_text(body)
+    return text_content.lower() # Kembalikan dalam huruf kecil untuk pencarian case-insensitive
 
-def parse_email_for_signal(text_content):
-    """Menganalisa teks email untuk mencari sinyal 'Exora AI' dan order 'buy'/'sell'."""
-    if not text_content:
-        return None
-
-    text_lower = text_content.lower() # Case-insensitive
-
-    if "exora ai" not in text_lower:
-        return None # Tidak ada keyword utama
-
-    # Cari kata 'order'
-    match = re.search(r'order\s+(\w+)', text_lower) # Cari 'order' diikuti satu kata
-    if match:
-        signal = match.group(1).strip() # Ambil kata setelah 'order'
-        if signal == "buy":
-            return "buy"
-        elif signal == "sell":
-            return "sell"
-
-    return None # Tidak ditemukan pola 'order buy' atau 'order sell'
-
-def check_emails(config, live_status):
-    """Menghubungkan ke Gmail, memeriksa email baru, dan memprosesnya."""
-    signals_found = []
+# --- Fungsi Beep ---
+def trigger_beep(action):
+    """Memicu pola beep berdasarkan aksi (buy/sell)."""
     try:
-        live_status.update(Text("Menghubungkan ke Gmail IMAP...", style="cyan"), spinner="dots")
-        mail = imaplib.IMAP4_SSL('imap.gmail.com')
+        if action == "buy":
+            CONSOLE.print("[bold green]ACTION:[/bold green] Memicu BEEP untuk 'BUY' (5 detik on/off)")
+            # Beep -f frekuensi -l durasi(ms) -D jeda(ms) -r pengulangan
+            # 5x (500ms on + 500ms off) = 5000ms = 5 detik
+            subprocess.run(["beep", "-f", "1000", "-l", "500", "-D", "500", "-r", "5"], check=True, capture_output=True)
+        elif action == "sell":
+            CONSOLE.print("[bold red]ACTION:[/bold red] Memicu BEEP untuk 'SELL' (2 kali beep)")
+            # 2x (1000ms on + 500ms off)
+            subprocess.run(["beep", "-f", "700", "-l", "1000", "-D", "500", "-r", "2"], check=True, capture_output=True)
+        else:
+             CONSOLE.print(f"[yellow]Warning:[/yellow] Aksi tidak dikenal '{action}', tidak ada beep.")
 
-        live_status.update(Text(f"Login sebagai {config['email']}...", style="cyan"), spinner="dots")
-        mail.login(config['email'], config['app_password'])
+    except FileNotFoundError:
+        CONSOLE.print("[bold red]Error:[/bold red] Perintah 'beep' tidak ditemukan. Pastikan sudah terinstall (`sudo apt install beep`) dan bisa diakses.")
+    except subprocess.CalledProcessError as e:
+        CONSOLE.print(f"[bold red]Error saat menjalankan 'beep':[/bold red] {e}")
+        if e.stderr:
+            CONSOLE.print(f"[red]Stderr:[/red] {e.stderr.decode()}")
+        rprint("[yellow]Pastikan user memiliki izin untuk menggunakan 'beep' atau modul 'pcspkr' dimuat.[/yellow]")
+    except Exception as e:
+        CONSOLE.print(f"[bold red]Error tak terduga saat beep:[/bold red] {e}")
 
-        live_status.update(Text("Memilih folder INBOX...", style="cyan"), spinner="dots")
-        mail.select('inbox')
+# --- Fungsi Pemrosesan Email ---
+def process_email(mail, email_id, settings):
+    """Mengambil, mem-parsing, dan memproses satu email."""
+    global running
+    if not running: return # Hentikan jika sinyal keluar diterima
 
-        # Cari email yang belum dibaca (UNSEEN)
-        live_status.update(Text("Mencari email baru (UNSEEN)...", style="cyan"), spinner="dots")
-        status, messages = mail.search(None, 'UNSEEN')
+    target_keyword_lower = settings['target_keyword'].lower()
+    trigger_keyword_lower = settings['trigger_keyword'].lower()
 
-        if status == 'OK':
-            email_ids = messages[0].split()
-            if not email_ids:
-                live_status.update(Text("Tidak ada email baru.", style="green"), spinner="dots")
-                time.sleep(2) # Beri waktu user membaca status
-            else:
-                console.print(f"[bold yellow]Ditemukan {len(email_ids)} email baru.[/bold yellow]")
+    try:
+        # Ambil data email (RFC822 standard)
+        status, data = mail.fetch(email_id, "(RFC822)")
+        if status != 'OK':
+            CONSOLE.print(f"[red]Error mengambil email ID {email_id}: {status}[/red]")
+            return
 
-                for i, email_id in enumerate(email_ids):
-                    current_progress = f"Memproses email {i+1}/{len(email_ids)}"
-                    live_status.update(Text(current_progress, style="cyan"), spinner="dots")
+        raw_email = data[0][1]
+        msg = email.message_from_bytes(raw_email)
 
-                    # Ambil data email (RFC822 = seluruh email)
-                    res, msg_data = mail.fetch(email_id, '(RFC822)')
+        # Dekode subjek
+        subject = decode_mime_words(msg["Subject"])
+        sender = decode_mime_words(msg["From"])
+        CONSOLE.print(f"\n[cyan]--- Email Baru Diterima ---[/cyan]")
+        CONSOLE.print(f"[bold]Dari:[/bold] {sender}")
+        CONSOLE.print(f"[bold]Subjek:[/bold] {subject}")
 
-                    if res == 'OK':
-                        for response_part in msg_data:
-                            if isinstance(response_part, tuple):
-                                # Parse email dari bytes
-                                msg = email.message_from_bytes(response_part[1])
+        # Ekstrak konten teks
+        body = get_text_from_email(msg)
 
-                                # Decode subject
-                                subject, encoding = decode_header(msg['Subject'])[0]
-                                if isinstance(subject, bytes):
-                                    subject = subject.decode(encoding if encoding else 'utf-8', errors='ignore')
+        # Gabungkan subjek dan body untuk pencarian keyword (opsional, bisa body saja)
+        full_content = (subject.lower() + " " + body)
 
-                                from_ = msg.get('From')
-                                console.print(f"\n[dim]Membaca email dari:[/dim] {from_} \n[dim]Subject:[/dim] {subject}")
+        # 1. Cari keyword target ("Exora AI")
+        if target_keyword_lower in full_content:
+            CONSOLE.print(f"[green]Keyword '{settings['target_keyword']}' ditemukan.[/green]")
 
-                                # Dapatkan body email (text/plain)
-                                body = get_email_body(msg)
-                                # console.print(f"[dim]Body Preview:[/dim] {body[:100]}...") # Opsi: Tampilkan preview body
+            # 2. Cari keyword pemicu ("order") setelah keyword target
+            # Cari posisi keyword target pertama
+            try:
+                target_index = full_content.index(target_keyword_lower)
+                # Cari keyword pemicu setelah keyword target
+                trigger_index = full_content.index(trigger_keyword_lower, target_index)
 
-                                # Parse untuk sinyal
-                                signal = parse_email_for_signal(subject + " " + body) # Cek subject dan body
+                # 3. Ambil kata setelah keyword pemicu
+                # Cari spasi setelah trigger keyword
+                start_word_index = trigger_index + len(trigger_keyword_lower)
+                # Ambil substring setelah trigger keyword dan hilangkan spasi di awal
+                text_after_trigger = full_content[start_word_index:].lstrip()
+                # Pisahkan kata pertama
+                words_after_trigger = text_after_trigger.split()
 
-                                if signal == "buy":
-                                    signals_found.append("buy")
-                                    beep_buy()
-                                elif signal == "sell":
-                                    signals_found.append("sell")
-                                    beep_sell()
-                                else:
-                                     console.print("[dim]Tidak ada sinyal 'Exora AI' dengan order 'buy'/'sell' ditemukan.[/dim]")
+                if words_after_trigger:
+                    action_word = words_after_trigger[0]
+                    CONSOLE.print(f"[blue]Trigger '{settings['trigger_keyword']}' ditemukan. Kata berikutnya: '{action_word}'[/blue]")
 
-                                # Tandai email sebagai sudah dibaca (SEEN)
-                                try:
-                                     mail.store(email_id, '+FLAGS', '\\Seen')
-                                     # console.print("[dim]Email ditandai sebagai sudah dibaca.[/dim]")
-                                except Exception as e_store:
-                                    console.print(f"[yellow]Warning: Gagal menandai email {email_id} sebagai SEEN: {e_store}[/yellow]")
+                    # 4. Cek apakah kata adalah 'buy' atau 'sell'
+                    if action_word == "buy":
+                        trigger_beep("buy")
+                    elif action_word == "sell":
+                        trigger_beep("sell")
                     else:
-                        console.print(f"[yellow]Warning: Gagal fetch email ID {email_id}[/yellow]")
-                    time.sleep(0.5) # Jeda sedikit antar pemrosesan email
+                        CONSOLE.print(f"[yellow]Kata setelah '{settings['trigger_keyword']}' bukan 'buy' atau 'sell'.[/yellow]")
+                else:
+                    CONSOLE.print(f"[yellow]Tidak ada kata setelah '{settings['trigger_keyword']}'.[/yellow]")
+
+            except ValueError:
+                # Jika .index() gagal (keyword tidak ditemukan di posisi yang diharapkan)
+                CONSOLE.print(f"[yellow]Keyword '{settings['trigger_keyword']}' tidak ditemukan setelah '{settings['target_keyword']}'.[/yellow]")
+            except Exception as e:
+                 CONSOLE.print(f"[red]Error saat parsing kata setelah trigger: {e}[/red]")
 
         else:
-            console.print(f"[red]Error saat mencari email: {status}[/red]")
+            CONSOLE.print(f"[yellow]Keyword '{settings['target_keyword']}' tidak ditemukan dalam email.[/yellow]")
 
-        # Logout dari server
-        mail.logout()
-        live_status.update(Text("Logout dari Gmail.", style="cyan"), spinner="dots")
-        time.sleep(1)
+        # Tandai email sebagai sudah dibaca ('Seen')
+        try:
+            mail.store(email_id, '+FLAGS', '\\Seen')
+        except Exception as e:
+            CONSOLE.print(f"[red]Error menandai email {email_id} sebagai 'Seen': {e}[/red]")
 
-    except imaplib.IMAP4.error as e:
-        console.print(f"[bold red]Error IMAP: {e}[/bold red]")
-        live_status.update(Text("Error IMAP. Cek koneksi/credential.", style="red"), spinner="dots")
-        time.sleep(5)
-    except ConnectionRefusedError:
-         console.print("[bold red]Error: Koneksi ke server IMAP ditolak. Firewall?[/bold red]")
-         live_status.update(Text("Koneksi ditolak.", style="red"), spinner="dots")
-         time.sleep(5)
     except Exception as e:
-        console.print(f"[bold red]Terjadi error tak terduga: {e}[/bold red]")
-        import traceback
-        traceback.print_exc() # Tampilkan detail error untuk debug
-        live_status.update(Text(f"Error: {e}", style="red"), spinner="dots")
-        time.sleep(5)
+        CONSOLE.print(f"[bold red]Error memproses email ID {email_id}:[/bold red] {e}")
+        # Pertimbangkan untuk tidak menandai sebagai 'Seen' jika error parah
 
-    return signals_found # Kembalikan daftar sinyal yang ditemukan (jika perlu)
+# --- Fungsi Listening Utama ---
+def start_listening(settings):
+    """Memulai loop untuk memeriksa email baru."""
+    global running
+    running = True # Pastikan state berjalan di set
+    mail = None # Inisialisasi mail
 
-# --- Fungsi Tampilan CLI ---
-def display_homepage():
-    """Menampilkan menu utama."""
-    console.clear()
-    console.print(Panel(
-        "[bold cyan]🚀 Gmail Signal Listener 🚀[/bold cyan]\n\n"
-        "Pilih Opsi:\n"
-        "[1] Mulai Mendengarkan Email\n"
-        "[2] Pengaturan (Email & App Password)\n"
-        "[3] Keluar",
-        title="Main Menu",
-        border_style="blue"
-    ))
-    choice = Prompt.ask("Masukkan pilihan", choices=["1", "2", "3"], default="1")
-    return choice
+    while running:
+        try:
+            with CONSOLE.status("[bold cyan]Menghubungkan ke server IMAP...", spinner="dots"):
+                mail = imaplib.IMAP4_SSL(settings['imap_server'])
+            rprint(f"[green]Terhubung ke {settings['imap_server']}[/green]")
 
-def display_settings(config):
+            with CONSOLE.status("[bold cyan]Melakukan login...", spinner="dots"):
+                 mail.login(settings['email_address'], settings['app_password'])
+            rprint(f"[green]Login berhasil sebagai {settings['email_address']}[/green]")
+
+            mail.select("inbox")
+            rprint("[bold blue]Memulai mode mendengarkan email di INBOX... (Tekan Ctrl+C untuk berhenti)[/bold blue]")
+
+            while running: # Loop pengecekan email
+                # Cari email yang belum dibaca
+                status, messages = mail.search(None, '(UNSEEN)')
+
+                if status != 'OK':
+                     CONSOLE.print(f"[red]Error mencari email: {status}[/red]")
+                     # Coba reconnect di iterasi berikutnya
+                     break # Keluar dari loop pengecekan, masuk ke loop reconnect
+
+                email_ids = messages[0].split()
+                if email_ids:
+                    rprint(f"\n[bold yellow]>>> Menemukan {len(email_ids)} email baru! <<<[/bold yellow]")
+                    for email_id in email_ids:
+                        if not running: break # Cek sebelum proses tiap email
+                        process_email(mail, email_id, settings)
+                    if not running: break # Cek setelah loop proses email
+                    rprint("[bold blue]Selesai memproses email baru. Kembali mendengarkan...[/bold blue]")
+                else:
+                    # Tidak ada email baru, tampilkan status menunggu
+                    with CONSOLE.status(f"[bold cyan]Menunggu email baru... Cek lagi dalam {settings['check_interval_seconds']} detik.", spinner="line"):
+                        # Sleep sambil bisa diinterupsi oleh Ctrl+C
+                        for _ in range(settings['check_interval_seconds']):
+                             if not running: break
+                             time.sleep(1)
+                    if not running: break # Cek setelah sleep
+
+                # Kirim NOOP secara berkala untuk menjaga koneksi tetap hidup (misal setiap 5 menit)
+                # Jika interval cek pendek, mungkin tidak perlu
+                # mail.noop()
+
+            # Jika keluar dari loop pengecekan (karena !running atau error)
+            if mail and mail.state == 'SELECTED':
+                mail.close()
+
+        except imaplib.IMAP4.error as e:
+            CONSOLE.print(f"[bold red]Error IMAP:[/bold red] {e}")
+            if "authentication failed" in str(e).lower():
+                rprint("[bold red]Login gagal! Periksa alamat email dan App Password.[/bold red]")
+                return # Kembali ke menu utama jika login gagal
+            rprint("[yellow]Akan mencoba menghubungkan kembali dalam 30 detik...[/yellow]")
+            time.sleep(30)
+        except ConnectionError as e:
+             CONSOLE.print(f"[bold red]Error Koneksi:[/bold red] {e}")
+             rprint("[yellow]Akan mencoba menghubungkan kembali dalam 30 detik...[/yellow]")
+             time.sleep(30)
+        except Exception as e:
+            CONSOLE.print(f"[bold red]Terjadi error tak terduga di loop listening:[/bold red] {e}")
+            rprint("[yellow]Akan mencoba menghubungkan kembali dalam 30 detik...[/yellow]")
+            time.sleep(30)
+        finally:
+            # Pastikan logout jika objek mail ada dan koneksi masih terbuka
+            if mail:
+                try:
+                    if mail.state != 'LOGOUT':
+                         mail.logout()
+                         rprint("[yellow]Logout dari server IMAP.[/yellow]")
+                except Exception as e:
+                    # Mungkin koneksi sudah ditutup
+                    pass #CONSOLE.print(f"[yellow]Warning: Error saat logout: {e}[/yellow]")
+            mail = None # Reset objek mail
+
+        if not running:
+            break # Keluar dari loop reconnect jika diminta berhenti
+
+    rprint("[bold yellow]Mode mendengarkan dihentikan.[/bold yellow]")
+
+
+# --- Fungsi Menu Pengaturan ---
+def show_settings(settings):
     """Menampilkan dan mengedit pengaturan."""
-    console.clear()
-    while True:
-        console.print(Panel(
-            f"[bold yellow]🔧 Pengaturan Saat Ini 🔧[/bold yellow]\n\n"
-            f"1. Email Akun Gmail : [cyan]{config['email']}[/cyan]\n"
-            f"2. App Password     : [cyan]{'*' * len(config.get('app_password', '')) if config.get('app_password') else '[Belum Diatur]'}[/cyan]\n"
-            f"3. Interval Cek (dtk): [cyan]{config['check_interval_seconds']}[/cyan]\n\n"
-            "Pilih nomor untuk diedit, [S] untuk Simpan & Kembali, atau [K] untuk Kembali tanpa simpan.",
-            title="Settings",
-            border_style="yellow"
-        ))
-        choice = Prompt.ask("Pilihan Anda", choices=["1", "2", "3", "S", "K", "s", "k"], default="K").upper()
+    clear_screen()
+    rprint(Panel.fit("[bold cyan]Pengaturan Email Listener[/bold cyan]", border_style="blue"))
 
-        if choice == "1":
-            new_email = Prompt.ask("Masukkan Email Gmail baru", default=config['email'])
-            if "@" in new_email and "." in new_email: # Validasi sederhana
-                 config['email'] = new_email
-            else:
-                 console.print("[red]Format email tidak valid.[/red]")
-                 time.sleep(1)
-        elif choice == "2":
-            console.print("[bold yellow]Masukkan App Password Gmail Anda.[/bold yellow]")
-            console.print("[dim](Input akan tersembunyi. Dapatkan dari: Akun Google > Keamanan > Sandi Aplikasi)[/dim]")
-            new_password = getpass("App Password baru: ")
+    while True:
+        rprint("\n[bold]Pengaturan Saat Ini:[/bold]")
+        rprint(f"1. Alamat Email   : [yellow]{settings['email_address'] or '[Belum diatur]'}[/yellow]")
+        rprint(f"2. App Password   : [yellow]{'*' * len(settings['app_password']) if settings['app_password'] else '[Belum diatur]'}[/yellow]")
+        rprint(f"3. Server IMAP    : [yellow]{settings['imap_server']}[/yellow]")
+        rprint(f"4. Interval Cek   : [yellow]{settings['check_interval_seconds']} detik[/yellow]")
+        rprint(f"5. Keyword Target : [yellow]{settings['target_keyword']}[/yellow]")
+        rprint(f"6. Keyword Trigger: [yellow]{settings['trigger_keyword']}[/yellow]")
+        rprint("\n[bold]Opsi:[/bold]")
+        rprint("[cyan]e[/cyan] - Edit Pengaturan")
+        rprint("[cyan]k[/cyan] - Kembali ke Menu Utama")
+
+        choice = CONSOLE.input("\nPilih opsi: ").lower()
+
+        if choice == 'e':
+            rprint("\n[bold blue]--- Edit Pengaturan ---[/bold blue]")
+            # Edit Email
+            new_email = CONSOLE.input(f"Masukkan alamat Email Gmail baru (biarkan kosong untuk skip): ").strip()
+            if new_email:
+                settings['email_address'] = new_email
+
+            # Edit App Password
+            rprint(Text("Masukkan App Password Gmail baru (penting: generate dari Akun Google, bukan password utama). Biarkan kosong untuk skip:", style="yellow"))
+            new_password = getpass.getpass("App Password: ")
             if new_password:
-                config['app_password'] = new_password
-            else:
-                console.print("[yellow]Input password kosong, tidak diubah.[/yellow]")
-                time.sleep(1)
-        elif choice == "3":
-             while True:
-                 try:
-                     new_interval = int(Prompt.ask("Masukkan interval cek email baru (detik)", default=str(config['check_interval_seconds'])))
-                     if new_interval >= 10: # Minimal interval 10 detik
-                         config['check_interval_seconds'] = new_interval
-                         break
-                     else:
-                          console.print("[red]Interval minimal 10 detik.[/red]")
-                 except ValueError:
-                     console.print("[red]Masukkan angka yang valid.[/red]")
-        elif choice == "S":
-            save_config(config)
-            console.print("[green]Pengaturan disimpan![/green]")
-            time.sleep(1)
+                 settings['app_password'] = new_password
+
+            # Edit Interval
+            while True:
+                new_interval_str = CONSOLE.input(f"Masukkan interval cek (detik) baru (biarkan kosong untuk skip, min 5): ").strip()
+                if not new_interval_str:
+                    break
+                try:
+                    new_interval = int(new_interval_str)
+                    if new_interval >= 5:
+                        settings['check_interval_seconds'] = new_interval
+                        break
+                    else:
+                        rprint("[red]Interval minimal adalah 5 detik.[/red]")
+                except ValueError:
+                    rprint("[red]Input tidak valid, masukkan angka.[/red]")
+
+            # Edit Keyword Target
+            new_target = CONSOLE.input(f"Masukkan keyword target baru (contoh: '{settings['target_keyword']}', biarkan kosong untuk skip): ").strip()
+            if new_target:
+                settings['target_keyword'] = new_target
+
+            # Edit Keyword Trigger
+            new_trigger = CONSOLE.input(f"Masukkan keyword trigger baru (contoh: '{settings['trigger_keyword']}', biarkan kosong untuk skip): ").strip()
+            if new_trigger:
+                settings['trigger_keyword'] = new_trigger
+
+            save_settings(settings)
+            rprint("[green]Pengaturan diperbarui.[/green]")
+            time.sleep(2)
+            clear_screen()
+            rprint(Panel.fit("[bold cyan]Pengaturan Email Listener[/bold cyan]", border_style="blue")) # Tampilkan panel lagi
+
+        elif choice == 'k':
             break
-        elif choice == "K":
-            # Reload config jika user batal edit
-            config = load_config()
-            console.print("[yellow]Perubahan dibatalkan.[/yellow]")
+        else:
+            rprint("[red]Pilihan tidak valid.[/red]")
             time.sleep(1)
-            break
-        console.clear() # Refresh tampilan setelah edit
-    return config # Kembalikan config yang mungkin sudah diupdate
-
-def start_listening(config):
-    """Memulai loop utama untuk memeriksa email secara berkala."""
-    console.clear()
-    console.print(Panel("[bold green]🎧 Memulai Mode Mendengarkan... Tekan Ctrl+C untuk berhenti. 🎧[/bold green]", border_style="green"))
-
-    if not config.get('email') or config['email'] == DEFAULT_CONFIG['email'] or \
-       not config.get('app_password') or config['app_password'] == DEFAULT_CONFIG['app_password']:
-        console.print("[bold red]Error: Email atau App Password belum diatur dengan benar.[/bold red]")
-        console.print("[yellow]Silakan atur melalui menu 'Pengaturan' terlebih dahulu.[/yellow]")
-        time.sleep(4)
-        return # Kembali ke menu utama
-
-    spinner = Spinner("dots", text=Text("Menunggu...", style="cyan"))
-    try:
-        with Live(spinner, refresh_per_second=10, console=console) as live:
-             while True:
-                live.update(Text(f"Mengecek email setiap {config['check_interval_seconds']} detik...", style="cyan"), spinner="dots")
-                check_emails(config, live) # Pass 'live' object untuk update status
-                # Setelah selesai cek, tampilkan status menunggu
-                for i in range(config['check_interval_seconds'], 0, -1):
-                    live.update(Text(f"Menunggu {i} detik untuk pengecekan berikutnya...", style="blue"), spinner="dots")
-                    time.sleep(1)
-
-    except KeyboardInterrupt:
-        console.print("\n[bold yellow]Interupsi diterima. Menghentikan listener...[/bold yellow]")
-        time.sleep(1)
-    except Exception as e:
-        console.print(f"\n[bold red]Error tak terduga di loop utama: {e}[/bold red]")
-        time.sleep(3)
+            clear_screen()
+            rprint(Panel.fit("[bold cyan]Pengaturan Email Listener[/bold cyan]", border_style="blue")) # Tampilkan panel lagi
 
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    config = load_config()
+# --- Fungsi Menu Utama ---
+def main_menu():
+    """Menampilkan menu utama aplikasi."""
+    settings = load_settings()
 
     while True:
-        choice = display_homepage()
-        if choice == "1":
-            start_listening(config)
-        elif choice == "2":
-            config = display_settings(config) # Update config jika ada perubahan
-        elif choice == "3":
-            console.print("[bold blue]Terima kasih telah menggunakan script ini! Sampai jumpa! 👋[/bold blue]")
-            sys.exit(0)
+        clear_screen()
+        title = Text("🚀 Exora AI - Email Listener 🚀", style="bold magenta", justify="center")
+        menu_text = Text.assemble(
+            "\nSilakan pilih opsi:\n\n",
+            "[ 1 ] ", Text("Mulai Mendengarkan Email", style="bold green"), "\n",
+            "[ 2 ] ", Text("Pengaturan", style="bold yellow"), "\n",
+            "[ 3 ] ", Text("Keluar", style="bold red"), "\n"
+        )
+        rprint(Panel(menu_text, title=title, border_style="blue", expand=False))
+
+        choice = CONSOLE.input("Masukkan pilihan Anda (1/2/3): ")
+
+        if choice == '1':
+            if not settings['email_address'] or not settings['app_password']:
+                rprint("[bold red]Error:[/bold red] Alamat Email atau App Password belum diatur di Pengaturan!")
+                time.sleep(3)
+            else:
+                clear_screen()
+                rprint(Panel.fit("[bold green]Memulai Mode Mendengarkan...[/bold green]", border_style="green"))
+                start_listening(settings) # Mulai loop utama
+                # Setelah loop selesai (misal karena Ctrl+C atau error login), kembali ke menu
+                rprint("\nKembali ke menu utama...")
+                time.sleep(2)
+        elif choice == '2':
+            show_settings(settings)
+            # Pengaturan mungkin berubah, muat ulang? Sebenarnya sudah di-pass by reference
+            # tapi untuk kejelasan, bisa load ulang jika diperlukan
+            # settings = load_settings()
+        elif choice == '3':
+            rprint("[bold blue]Terima kasih telah menggunakan script ini! Sampai jumpa![/bold blue]")
+            sys.exit(0) # Keluar dari script
+        else:
+            rprint("[bold red]Pilihan tidak valid.[/bold red]")
+            time.sleep(1.5)
+
+
+# --- Entry Point ---
+if __name__ == "__main__":
+    try:
+        main_menu()
+    except Exception as e:
+        CONSOLE.print_exception(show_locals=True)
+        rprint(f"\n[bold red]Terjadi error kritis yang tidak tertangani:[/bold red] {e}")
+        rprint("Program akan keluar.")
+        sys.exit(1)
