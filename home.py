@@ -1,242 +1,299 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
-import sys
+import subprocess
 import time
-import random
 import platform
 import socket
-import subprocess
-try:
-    from pyfiglet import Figlet
-except ImportError:
-    print("Error: Modul 'pyfiglet' belum terinstall.")
-    print("Silakan install dengan: pip install pyfiglet")
-    sys.exit(1)
+import sys
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+from rich.layout import Layout
+from rich.live import Live
+from rich.spinner import Spinner
+from rich.table import Table
+from rich.progress import track
+from rich.prompt import Prompt
+import psutil # Perlu install: pip install psutil rich
 
 # --- Konfigurasi ---
-APP_TITLE = "exora"
-SPARTAN_SCRIPT = "spartan.py" # Pastikan file ini ada atau ganti path
-REFRESH_RATE = 0.5 # Detik (untuk animasi warna)
-FIGLET_FONT = 'slant' # Coba font lain: 'standard', 'big', 'doom', 'banner3-D'
+APP_NAME = "Exora Spartan CLI"
+VERSION = "1.0"
+SPARTAN_SCRIPT = "spartan.py" # Pastikan nama file ini benar
+AUTHOR = "YourNameHere" # Ganti dengan nama lu atau biarin kosong
 
-# --- Kode Warna ANSI ---
-COLORS = [
-    "\033[31m",  # Merah
-    "\033[32m",  # Hijau
-    "\033[33m",  # Kuning
-    "\033[34m",  # Biru
-    "\033[35m",  # Magenta
-    "\033[36m",  # Cyan
-    "\033[91m",  # Merah Terang
-    "\033[92m",  # Hijau Terang
-    "\033[93m",  # Kuning Terang
-    "\033[94m",  # Biru Terang
-    "\033[95m",  # Magenta Terang
-    "\033[96m",  # Cyan Terang
-]
-RESET_COLOR = "\033[0m"
-BOLD = "\033[1m"
+# --- Helper Functions ---
+console = Console()
 
-# --- Fungsi Helper ---
 def clear_screen():
     """Membersihkan layar terminal."""
     os.system('cls' if os.name == 'nt' else 'clear')
 
-def get_terminal_size():
-    """Mendapatkan ukuran terminal (lebar, tinggi)."""
+def get_ip_address():
+    """Mendapatkan alamat IP lokal."""
     try:
-        return os.get_terminal_size()
-    except OSError:
-        return 80, 24 # Default jika gagal
-
-def display_header(text, font):
-    """Menampilkan ASCII art dengan warna acak."""
-    f = Figlet(font=font)
-    ascii_art = f.renderText(text)
-    color = random.choice(COLORS)
-    print(f"{BOLD}{color}{ascii_art}{RESET_COLOR}")
-
-def display_taskbar():
-    """Menampilkan taskbar di bagian bawah."""
-    width, _ = get_terminal_size()
-    options = "[S]tart Spartan | [I]nfo | [R]estart | [H]alt | [Q]uit"
-    # Buat garis pemisah atau latar belakang sederhana
-    bar = f"{BOLD}{COLORS[3]}{'═' * width}{RESET_COLOR}"
-    # Pusatkan opsi di taskbar jika memungkinkan
-    padding = (width - len(options.replace('[S]', 'S').replace('[I]', 'I').replace('[R]', 'R').replace('[H]', 'H').replace('[Q]', 'Q'))) // 2
-    taskbar_text = f"{' ' * padding}{BOLD}{COLORS[6]}{options}{RESET_COLOR}"
-
-    # Menggunakan ANSI escape code untuk memposisikan kursor ke baris terakhir
-    # \033[<L>;<C>H -> Pindahkan kursor ke baris L, kolom C
-    # \033[K -> Hapus dari kursor sampai akhir baris
-    # Kita akan print di dua baris terakhir
-    sys.stdout.write(f"\033[{get_terminal_size()[1]-1};1H") # Pindah ke baris kedua dari bawah
-    sys.stdout.write(bar + '\n') # Print garis
-    sys.stdout.write(f"\033[{get_terminal_size()[1]};1H") # Pindah ke baris terakhir
-    sys.stdout.write(taskbar_text + "\033[K") # Print opsi dan hapus sisa baris
-    sys.stdout.flush()
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80)) # Connect ke DNS Google (gak kirim data)
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "N/A"
 
 def get_device_info():
-    """Mengumpulkan dan memformat info perangkat."""
-    info = []
+    """Mengumpulkan informasi perangkat."""
+    info = {}
     try:
-        info.append(f"Hostname: {socket.gethostname()}")
+        info['Hostname'] = platform.node()
+        info['OS'] = f"{platform.system()} {platform.release()}"
+        info['Architecture'] = platform.machine()
+        info['IP Address'] = get_ip_address()
+        # Info CPU
+        cpu_count_logical = psutil.cpu_count(logical=True)
+        cpu_count_physical = psutil.cpu_count(logical=False)
+        info['CPU'] = f"{platform.processor()} ({cpu_count_physical} Cores / {cpu_count_logical} Threads)"
+        info['CPU Usage'] = f"{psutil.cpu_percent(interval=0.5)}%"
+        # Info RAM
+        mem = psutil.virtual_memory()
+        info['RAM Total'] = f"{mem.total / (1024**3):.2f} GB"
+        info['RAM Used'] = f"{mem.used / (1024**3):.2f} GB ({mem.percent}%)"
+        # Info Disk (Root)
+        disk = psutil.disk_usage('/')
+        info['Disk Total'] = f"{disk.total / (1024**3):.2f} GB"
+        info['Disk Used'] = f"{disk.used / (1024**3):.2f} GB ({disk.percent}%)"
+
     except Exception as e:
-        info.append(f"Hostname: Error ({e})")
+        info['Error'] = f"Gagal mengambil info: {e}"
+    return info
 
-    info.append(f"OS: {platform.system()} {platform.release()} ({platform.machine()})")
-    info.append(f"Platform: {platform.platform()}")
-
+def run_command(command, sudo=False):
+    """Menjalankan command sistem (opsional dengan sudo)."""
+    if sudo:
+        command.insert(0, 'sudo')
     try:
-        # Coba dapatkan IP address utama (mungkin perlu penyesuaian di sistem tertentu)
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0)
-        s.connect(('8.8.8.8', 80)) # Terhubung ke IP eksternal (tidak mengirim data)
-        ip_address = s.getsockname()[0]
-        s.close()
-        info.append(f"IP Address: {ip_address}")
-    except Exception:
-        info.append("IP Address: Tidak dapat dideteksi")
+        console.print(f"\n[yellow]Menjalankan:[/yellow] {' '.join(command)}")
+        # Cek apakah butuh password sudo
+        if sudo and os.geteuid() != 0:
+             console.print("[bold yellow]Membutuhkan hak akses root (sudo). Masukkan password jika diminta.[/bold yellow]")
 
-    try:
-        # Dapatkan uptime (Linux/macOS)
-        uptime_str = subprocess.check_output(['uptime', '-p'], text=True).strip()
-        info.append(f"Uptime: {uptime_str.replace('up ', '')}")
+        # Menggunakan Popen agar bisa lanjut tanpa menunggu command selesai (misal shutdown/reboot)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # Untuk shutdown/reboot, kita tidak perlu menunggu output
+        if "shutdown" in command or "reboot" in command:
+            console.print("[green]Perintah dikirim...[/green]")
+            time.sleep(2) # Beri jeda sedikit
+            return None, None # Tidak mengembalikan output/error
+
+        # Untuk command lain, tunggu dan ambil output/error
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            console.print(f"[bold red]Error:[/bold red]\n{stderr}")
+            return None, stderr
+        return stdout, None
     except FileNotFoundError:
-         info.append("Uptime: Perintah 'uptime' tidak ditemukan")
+        console.print(f"[bold red]Error:[/bold red] Perintah '{command[0]}' tidak ditemukan. Pastikan sudah terinstall.")
+        return None, "Command not found"
     except Exception as e:
-        info.append(f"Uptime: Error ({e})")
+        console.print(f"[bold red]Error saat menjalankan command:[/bold red] {e}")
+        return None, str(e)
 
-    return "\n".join(info)
+# --- Komponen UI ---
 
-def run_spartan():
-    """Menjalankan script spartan.py."""
+def create_header():
+    """Membuat panel header dengan animasi."""
+    # Animasi sederhana: Ganti warna atau karakter
+    frame = int(time.time() * 2) % 4 # Buat frame sederhana (0, 1, 2, 3)
+    colors = ["bold cyan", "bold magenta", "bold yellow", "bold green"]
+    chars = ["✦", "✧", "★", "☆"]
+
+    title_text = Text.assemble(
+        (f"{chars[frame]} Exora ", colors[frame]),
+        ("Spartan", "bold white"),
+        (f" {chars[(frame+1)%4]}", colors[frame]),
+        (f" v{VERSION}", "dim white")
+    )
+    return Panel(title_text, style="bold blue", border_style="blue", title_align="left")
+
+def create_taskbar(options, current_selection_text=""):
+    """Membuat panel taskbar."""
+    taskbar_items = []
+    for i, option in enumerate(options):
+         # Beri style berbeda jika ini adalah pilihan yang akan dieksekusi
+        style = "on grey23" if option == current_selection_text else "none"
+        taskbar_items.append(Text(f" {i+1}. {option} ", style=style))
+        taskbar_items.append(Text(" | ", style="dim blue"))
+
+    # Hilangkan separator terakhir
+    if taskbar_items:
+        taskbar_items.pop()
+
+    return Panel(Text.assemble(*taskbar_items), style="blue", border_style="dim blue", title="[ Menu ]", title_align="left")
+
+def display_device_info():
+    """Menampilkan informasi perangkat dalam tabel."""
     clear_screen()
-    print(f"{BOLD}{COLORS[1]}Menjalankan {SPARTAN_SCRIPT}...{RESET_COLOR}\n")
+    console.print(Panel("[bold green]🚀 Informasi Perangkat 🚀[/bold green]", style="green", border_style="green"))
+    with console.status("[yellow]Mengambil data...", spinner="dots"):
+        info = get_device_info()
+        time.sleep(0.5) # Biar keliatan loading :)
+
+    if 'Error' in info:
+        console.print(f"[bold red]Error:[/bold red] {info['Error']}")
+    else:
+        table = Table(show_header=True, header_style="bold magenta", border_style="dim blue")
+        table.add_column("Parameter", style="cyan", width=20)
+        table.add_column("Value", style="white")
+
+        for key, value in info.items():
+            table.add_row(key, value)
+
+        console.print(table)
+
+    console.print("\n[yellow]Tekan Enter untuk kembali ke menu utama...[/yellow]")
+    input() # Tunggu user menekan Enter
+
+def start_spartan_script():
+    """Mulai script spartan.py."""
+    clear_screen()
+    console.print(f"[bold cyan]Mencoba menjalankan {SPARTAN_SCRIPT}...[/bold cyan]")
+    time.sleep(1)
+
+    script_path = os.path.join(os.path.dirname(__file__), SPARTAN_SCRIPT) # Cari di direktori yang sama
+
+    if not os.path.exists(script_path):
+        console.print(f"[bold red]Error:[/bold red] File '{SPARTAN_SCRIPT}' tidak ditemukan di direktori yang sama.")
+        console.print("[yellow]Tekan Enter untuk kembali...[/yellow]")
+        input()
+        return
+
+    # Cek apakah executable
+    if not os.access(script_path, os.X_OK):
+         # Coba jalankan dengan python jika tidak executable
+         console.print(f"[yellow]Script tidak executable, mencoba menjalankan dengan 'python3 {SPARTAN_SCRIPT}'...[/yellow]")
+         command = [sys.executable, script_path] # sys.executable -> path python yg sedang jalan
+    else:
+         # Jika executable, jalankan langsung
+         command = [script_path]
+
+
+    # Jalankan script di proses baru. Ini akan menggantikan proses saat ini.
+    # Jika ingin kembali ke menu ini setelah spartan.py selesai, gunakan subprocess.run()
+    # os.execvp(command[0], command)
+    # --- ATAU --- (Jika ingin kembali ke menu setelah spartan.py exit)
     try:
-        # Menggunakan sys.executable untuk memastikan menggunakan interpreter python yang sama
-        subprocess.run([sys.executable, SPARTAN_SCRIPT], check=True)
-    except FileNotFoundError:
-        print(f"{BOLD}{COLORS[0]}Error: Script '{SPARTAN_SCRIPT}' tidak ditemukan.{RESET_COLOR}")
-        input("\nTekan Enter untuk kembali...")
+        console.print(f"Menjalankan: {' '.join(command)}")
+        # Simpan state terminal asli
+        original_stty = subprocess.run(['stty', '-g'], capture_output=True, text=True).stdout.strip()
+        # Jalankan script
+        subprocess.run(command, check=True)
+        console.print(f"\n[green]{SPARTAN_SCRIPT} selesai dijalankan.[/green]")
     except subprocess.CalledProcessError as e:
-        print(f"{BOLD}{COLORS[0]}Error saat menjalankan '{SPARTAN_SCRIPT}': {e}{RESET_COLOR}")
-        input("\nTekan Enter untuk kembali...")
+        console.print(f"[bold red]Error saat menjalankan {SPARTAN_SCRIPT}:[/bold red] {e}")
+    except FileNotFoundError:
+         console.print(f"[bold red]Error:[/bold red] Perintah '{command[0]}' tidak ditemukan.")
     except Exception as e:
-        print(f"{BOLD}{COLORS[0]}Terjadi error tak terduga: {e}{RESET_COLOR}")
-        input("\nTekan Enter untuk kembali...")
+         console.print(f"[bold red]Error tak terduga:[/bold red] {e}")
+    finally:
+        # Pulihkan state terminal setelah script selesai atau error
+        if original_stty:
+            subprocess.run(['stty', original_stty])
+        clear_screen() # Bersihkan layar sebelum kembali ke menu
+        console.print("[yellow]Kembali ke menu utama...[/yellow]")
+        time.sleep(1.5)
 
-def shutdown_system():
-    """Mematikan sistem (memerlukan sudo)."""
-    clear_screen()
-    print(f"{BOLD}{COLORS[0]}PERINGATAN: Ini akan mematikan server!{RESET_COLOR}")
-    confirm = input("Ketik 'yes' untuk konfirmasi shutdown: ").lower()
-    if confirm == 'yes':
-        print("Mencoba mematikan sistem (memerlukan hak akses root/sudo)...")
-        try:
-            # Coba jalankan shutdown. Mungkin perlu password sudo.
-            os.system('sudo shutdown now')
-            print("Perintah shutdown dikirim.")
-            time.sleep(10) # Beri waktu sebelum mungkin keluar
-        except Exception as e:
-            print(f"{BOLD}{COLORS[0]}Gagal menjalankan shutdown: {e}{RESET_COLOR}")
-            print("Pastikan Anda menjalankan script ini dengan user yang punya hak sudo,")
-            print("atau jalankan perintah 'sudo shutdown now' secara manual.")
-            input("\nTekan Enter untuk kembali...")
-    else:
-        print("Shutdown dibatalkan.")
-        time.sleep(2)
-
-def restart_system():
-    """Merestart sistem (memerlukan sudo)."""
-    clear_screen()
-    print(f"{BOLD}{COLORS[0]}PERINGATAN: Ini akan merestart server!{RESET_COLOR}")
-    confirm = input("Ketik 'yes' untuk konfirmasi restart: ").lower()
-    if confirm == 'yes':
-        print("Mencoba merestart sistem (memerlukan hak akses root/sudo)...")
-        try:
-            # Coba jalankan reboot. Mungkin perlu password sudo.
-            os.system('sudo reboot')
-            print("Perintah restart dikirim.")
-            time.sleep(10) # Beri waktu sebelum mungkin keluar
-        except Exception as e:
-            print(f"{BOLD}{COLORS[0]}Gagal menjalankan restart: {e}{RESET_COLOR}")
-            print("Pastikan Anda menjalankan script ini dengan user yang punya hak sudo,")
-            print("atau jalankan perintah 'sudo reboot' secara manual.")
-            input("\nTekan Enter untuk kembali...")
-    else:
-        print("Restart dibatalkan.")
-        time.sleep(2)
 
 # --- Main Loop ---
 def main():
-    last_input_time = time.time()
-    try:
+    menu_options = {
+        "1": ("Start Spartan", start_spartan_script),
+        "2": ("Device Info", display_device_info),
+        "3": ("Restart Server", lambda: run_command(['shutdown', '-r', 'now'], sudo=True)),
+        "4": ("Shutdown Server", lambda: run_command(['shutdown', '-h', 'now'], sudo=True)),
+        "5": ("Exit", lambda: None) # None akan menghentikan loop
+    }
+    option_names = [details[0] for details in menu_options.values()]
+
+    layout = Layout()
+    layout.split(
+        Layout(name="header", size=3),
+        Layout(name="main", ratio=1), # Space kosong di tengah
+        Layout(name="taskbar", size=3)
+    )
+
+    with Live(layout, refresh_per_second=4, screen=True, transient=True) as live:
         while True:
-            clear_screen()
-            # Tampilkan header dengan animasi warna
-            display_header(APP_TITLE, FIGLET_FONT)
+            # Update header (animasi)
+            layout["header"].update(create_header())
+            # Update taskbar (statis)
+            layout["taskbar"].update(create_taskbar(option_names))
+            # Update area main (kosong atau pesan)
+            layout["main"].update(Panel(
+                f"[dim]Selamat datang di {APP_NAME}! Ketik nomor menu dan tekan Enter.[/dim]\n"
+                f"[dim]Server time: {time.strftime('%Y-%m-%d %H:%M:%S')}[/dim]",
+                border_style="dim blue"
+            ))
 
-            # Tambahkan sedikit padding di bawah header
-            print("\n" * 2)
-            print(f"{BOLD}{COLORS[5]}Selamat datang di Homepage Server Anda!{RESET_COLOR}".center(get_terminal_size()[0]))
-            print("\n" * 3) # Beri ruang sebelum taskbar
-
-            # Tampilkan taskbar
-            display_taskbar()
-
-            # Cek input non-blocking (susah tanpa library khusus seperti curses)
-            # Sebagai gantinya, kita pakai input() tapi dengan timeout 'pura-pura'
-            # dengan hanya menunggu input setelah sekian detik tidak ada aktivitas
-            # Atau lebih baik, kita langsung minta input saja di setiap loop
-
-            # Minta input di posisi yang aman (misalnya, satu baris di atas taskbar)
-            rows, _ = get_terminal_size()
-            sys.stdout.write(f"\033[{rows - 3};1H") # Pindah kursor 2 baris di atas taskbar bawah
-            sys.stdout.write("\033[K") # Hapus baris input sebelumnya
+            # Dapatkan input di luar Live context agar tidak bentrok
+            live.stop() # Hentikan sementara Live update
             try:
-                choice = input(f"{BOLD}{COLORS[2]}Pilih opsi: {RESET_COLOR}").lower()
-            except EOFError: # Jika input diakhiri (misal Ctrl+D)
-                choice = 'q'
+                # Gunakan Prompt dari Rich untuk input yang lebih bagus
+                choice = Prompt.ask(f"[bold yellow]Pilih Opsi (1-{len(menu_options)})[/bold yellow]",
+                                    choices=list(menu_options.keys()),
+                                    show_choices=False) # Sembunyikan pilihan default prompt
+            except (KeyboardInterrupt, EOFError):
+                choice = str(len(menu_options)) # Anggap pilih Exit jika Ctrl+C atau Ctrl+D
+            live.start() # Lanjutkan Live update
 
+            if choice in menu_options:
+                option_name, action = menu_options[choice]
 
-            # Proses Pilihan
-            if choice == 's':
-                run_spartan()
-            elif choice == 'i':
-                clear_screen()
-                display_header(APP_TITLE, FIGLET_FONT) # Tampilkan header lagi
-                print(f"\n{BOLD}{COLORS[4]}--- Informasi Perangkat ---{RESET_COLOR}\n")
-                print(get_device_info())
-                print(f"\n{BOLD}-------------------------{RESET_COLOR}")
-                input("\nTekan Enter untuk kembali...")
-            elif choice == 'r':
-                restart_system()
-                # Jika restart berhasil, script mungkin tidak akan lanjut
-                # Jika gagal atau dibatalkan, loop akan lanjut
-            elif choice == 'h':
-                shutdown_system()
-                # Jika shutdown berhasil, script mungkin tidak akan lanjut
-                # Jika gagal atau dibatalkan, loop akan lanjut
-            elif choice == 'q':
-                clear_screen()
-                print(f"{BOLD}{COLORS[1]}Terima kasih! Sampai jumpa.{RESET_COLOR}")
-                sys.exit(0)
+                if action is None: # Opsi Exit
+                    live.stop() # Hentikan Live sebelum keluar
+                    clear_screen()
+                    console.print(f"[bold green]Exiting {APP_NAME}. Sampai jumpa![/bold green]")
+                    # Animasi keluar sederhana
+                    for i in track(range(3), description="[red]Shutting down interface..."):
+                        time.sleep(0.3)
+                    break # Keluar dari loop utama
+
+                # Tandai taskbar sebelum eksekusi action
+                live.update(layout) # Render sekali lagi dengan taskbar normal
+                layout["taskbar"].update(create_taskbar(option_names, current_selection_text=option_name))
+                live.update(layout) # Tampilkan taskbar dengan highlight
+                time.sleep(0.5) # Jeda sesaat biar keliatan
+
+                live.stop() # Hentikan Live update sebelum menjalankan action
+                clear_screen() # Bersihkan layar sebelum action
+                action() # Jalankan fungsi yang dipilih
+                clear_screen() # Bersihkan layar setelah action selesai (kecuali exit)
+                # Loop akan lanjut dan Live akan di-start lagi
+                live.start(refresh=True) # Mulai lagi Live
             else:
-                # Jika input tidak valid, cukup refresh layar di iterasi berikutnya
-                pass
+                 # Jika input tidak valid, tampilkan pesan sementara
+                 original_main_content = layout["main"].renderable
+                 layout["main"].update(Panel("[bold red]Pilihan tidak valid![/bold red]", border_style="red"))
+                 live.update(layout)
+                 time.sleep(1)
+                 layout["main"].update(original_main_content) # Kembalikan konten main
 
-            # Sedikit delay untuk animasi (jika tidak ada input)
-            # Jika kita selalu meminta input, delay ini tidak terlalu efektif
-            # time.sleep(REFRESH_RATE)
-
-    except KeyboardInterrupt:
-        clear_screen()
-        print(f"\n{BOLD}{COLORS[1]}Keluar... Sampai jumpa!{RESET_COLOR}")
-        sys.exit(0)
-    finally:
-        # Pastikan kursor terlihat dan warna kembali normal saat keluar
-        sys.stdout.write("\033[?25h") # Tampilkan kursor
-        print(RESET_COLOR)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # Pastikan keluar dari mode layar alternatif jika ada error tak terduga
+        console.show_cursor(True)
+        # Keluar dari screen mode jika aktif (penting!)
+        # Ini agak tricky karena state screen dikelola 'Live'
+        # Mencoba membersihkan sebisanya
+        clear_screen()
+        print(f"\n\n[!] Terjadi error tak terduga: {e}")
+        import traceback
+        traceback.print_exc()
+        print("\nInterface dihentikan paksa.")
+    finally:
+        # Pastikan cursor selalu terlihat saat keluar
+        console.show_cursor(True)
