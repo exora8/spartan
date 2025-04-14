@@ -4,7 +4,7 @@ import sys
 import os
 import time
 import getpass
-import re # Import regex
+import re # <-- Import modul Regex
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -19,7 +19,7 @@ DEBUG_PARSING = True
 
 console = Console()
 
-# ... (Fungsi run_command, check_root tetap sama seperti v2) ...
+# ... (Fungsi run_command, check_root tetap sama seperti v2/v3) ...
 def run_command(command_list, check=True, capture_output=True, text=True, timeout=30):
     """Menjalankan command system dan mengembalikan output."""
     try:
@@ -33,14 +33,10 @@ def run_command(command_list, check=True, capture_output=True, text=True, timeou
         )
         return result
     except FileNotFoundError:
-        console.print(f"[bold red]Error:[/bold red] Perintah '{command_list[0]}' tidak ditemukan. Pastikan NetworkManager (nmcli) terinstall.")
+        console.print(f"[bold red]Error:[/bold red] Perintah '{command_list[0]}' tidak ditemukan.")
         sys.exit(1)
     except subprocess.CalledProcessError as e:
-        console.print(f"[bold red]Error menjalankan perintah:[/bold red] {' '.join(command_list)}")
-        if e.stderr and e.stderr.strip():
-            console.print(f"[red]Stderr:[/red]\n{e.stderr.strip()}")
-        if e.stdout and e.stdout.strip():
-            console.print(f"[yellow]Stdout:[/yellow]\n{e.stdout.strip()}")
+        # Error sudah ditangani di pemanggil jika diperlukan
         return e
     except subprocess.TimeoutExpired:
         console.print(f"[bold red]Error:[/bold red] Perintah '{' '.join(command_list)}' timed out.")
@@ -52,18 +48,21 @@ def run_command(command_list, check=True, capture_output=True, text=True, timeou
 def check_root():
     """Memeriksa apakah script dijalankan sebagai root."""
     if os.geteuid() != 0:
-        console.print("[bold yellow]Peringatan:[/bold yellow] Script ini sangat disarankan dijalankan dengan hak akses root (sudo).")
-        console.print("Menjalankan tanpa sudo mungkin gagal saat mencoba koneksi.")
-        # Tidak exit, biarkan user mencoba tapi beri peringatan
+        console.print("[bold yellow]Peringatan:[/bold yellow] Script ini sangat disarankan dijalankan dengan `sudo`.")
+        # Tidak memaksa exit
 
-# --- FUNGSI SCAN WIFI YANG DIPERBARUI ---
+# --- FUNGSI SCAN WIFI YANG DIPERBARUI DENGAN REGEX ---
 def scan_wifi():
-    """Scan jaringan Wi-Fi menggunakan nmcli dengan parsing yang lebih robust."""
+    """Scan jaringan Wi-Fi menggunakan nmcli dengan parsing Regex."""
     console.print("[cyan]🔍 Memindai jaringan Wi-Fi di sekitar...[/cyan]")
-    # Fields: BSSID,SSID,CHAN,RATE,SIGNAL,SECURITY (6 fields)
-    # Tetap pakai -g, tapi parsing akan lebih hati-hati
+    cmd = ["nmcli", "-e", "no", "-g", "BSSID,SSID,CHAN,RATE,SIGNAL,SECURITY", "dev", "wifi", "list", "--rescan", "yes"]
+    # `-e no`: Minta nmcli TIDAK meng-escape karakter spesial seperti ':'
+    # Kita akan handle pemisahan sendiri dengan regex yg lebih canggih
+    # Update: Ternyata `-e no` malah bikin kacau jika SSID mengandung ':'.
+    # Balik pakai default (escape aktif) dan regex untuk split.
     cmd = ["nmcli", "-g", "BSSID,SSID,CHAN,RATE,SIGNAL,SECURITY", "dev", "wifi", "list", "--rescan", "yes"]
-    result = run_command(cmd, capture_output=True, text=True, timeout=25) # Tambah sedikit timeout
+
+    result = run_command(cmd, capture_output=True, text=True, timeout=25)
 
     if result is None or isinstance(result, subprocess.CalledProcessError) or not result.stdout:
         stderr_msg = getattr(result, 'stderr', '').strip()
@@ -83,47 +82,64 @@ def scan_wifi():
              console.print(f"[grey50]  L{i+1}: {line}[/grey50]")
         console.print("[grey50]-- Akhir DEBUG Mentah --[/grey50]\n")
 
+    # Regex untuk split berdasarkan ':' yang TIDAK diawali '\' (negative lookbehind)
+    # Akan split maksimal 5 kali untuk mendapatkan 6 field
+    # Contoh: "AA\:BB:CC:SS\:ID:1:100:80:WPA2"
+    # Hasil split: ['AA\:BB', 'CC', 'SS\:ID', '1', '100', '80:WPA2'] -> INI SALAH jika security ada ':'
+    # Mari kita coba pendekatan regex matching group saja
+    # Pola: (BSSID):(SSID):(CHAN):(RATE):(SIGNAL):(SECURITY)
+    #       ^-----^ ^----^ ^----^ ^----^ ^------^ ^--------^
+    # Kita perlu menangani '\:' di dalam setiap grup.
+    # Pola field: [^:]*(?:\\:[^:]*)* -> cocok non-colon ATAU escaped-colon diikuti non-colon, berulang
+    field_pattern = r'([^:]*(?:\\:[^:]*)*)' # Pola untuk 1 field yg mungkin ada '\:'
+    # Gabungkan 6 field dipisah ':'
+    line_regex = re.compile(
+        r'^' +             # Awal baris
+        field_pattern + r':' + # Grup 1: BSSID
+        field_pattern + r':' + # Grup 2: SSID
+        field_pattern + r':' + # Grup 3: CHAN
+        field_pattern + r':' + # Grup 4: RATE
+        field_pattern + r':' + # Grup 5: SIGNAL
+        field_pattern +        # Grup 6: SECURITY (bisa kosong)
+        r'$'               # Akhir baris
+    )
+
+
     for i, line in enumerate(raw_lines):
         line = line.strip()
         if not line: continue
 
-        # --- LOGIKA PARSING BARU ---
-        # Kita tahu ada 5 ':' sebagai pemisah KECUALI jika ada ':' di dalam SSID itu sendiri.
-        # nmcli -g SEHARUSNYA menangani ini dengan escaping (\:) tapi mari kita coba cara lain.
-        # Asumsi: BSSID, CHAN, RATE, SIGNAL, SECURITY tidak mengandung ':'
-        # Jadi, SSID adalah semua di antara ':' pertama dan ':' kedua dari *belakang*
-        parts = line.split(':')
+        match = line_regex.match(line)
 
-        if len(parts) >= 6: # Minimal harus ada 6 bagian (5 pemisah)
-            bssid = parts[0].strip()
-            # Bagian terakhir adalah security, sebelumnya signal, sebelumnya rate, sebelumnya channel
-            security_str = parts[-1].strip()
-            signal_str = parts[-2].strip()
-            rate_str = parts[-3].strip()
-            chan = parts[-4].strip()
-            # Semua yang ditengah adalah SSID (gabungkan kembali jika SSID mengandung ':')
-            ssid = ":".join(parts[1:-4]).strip()
+        if match:
+            # Ambil semua 6 grup hasil match
+            bssid_raw, ssid_raw, chan_raw, rate_raw, signal_raw, security_raw = match.groups()
+
+            # --- Unescape dan Bersihkan ---
+            # Ganti '\:' menjadi ':' di BSSID dan SSID (yg paling mungkin)
+            bssid = bssid_raw.replace('\\:', ':').strip()
+            ssid = ssid_raw.replace('\\:', ':').strip()
+            chan = chan_raw.strip() # Channel biasanya angka saja
+            rate_str = rate_raw.replace('\\:',':').strip() # Rate bisa ada spasi
+            signal_str = signal_raw.strip() # Signal angka saja
+            security = security_raw.replace('\\:',':').strip() if security_raw else "Open" # Keamanan bisa kompleks
 
             if DEBUG_PARSING:
                 console.print(f"[grey50]  DEBUG L{i+1}: Parsing line '{line}'[/grey50]")
-                console.print(f"[grey50]    -> BSSID : '{bssid}'[/grey50]")
-                console.print(f"[grey50]    -> SSID  : '{ssid}' <<--- PERIKSA INI![/grey50]")
-                console.print(f"[grey50]    -> CHAN  : '{chan}'[/grey50]")
-                console.print(f"[grey50]    -> RATE  : '{rate_str}'[/grey50]")
-                console.print(f"[grey50]    -> SIGNAL: '{signal_str}'[/grey50]")
-                console.print(f"[grey50]    -> SECUR : '{security_str}'[/grey50]")
+                console.print(f"[grey50]    -> RAW   : B='{bssid_raw}' S='{ssid_raw}' Ch='{chan_raw}' R='{rate_raw}' Si='{signal_raw}' Se='{security_raw}'[/grey50]")
+                console.print(f"[grey50]    -> PARSED: B='{bssid}' S='{ssid}' Ch='{chan}' R='{rate_str}' Si='{signal_str}' Se='{security}' <<--- PERIKSA SSID[/grey50]")
+
 
             # Validasi dasar
-            if not ssid or not bssid: # Perlu SSID dan BSSID
-                if DEBUG_PARSING: console.print(f"[yellow]  -> Skipping L{i+1}: SSID atau BSSID kosong.[/yellow]")
+            if not ssid or not bssid:
+                if DEBUG_PARSING: console.print(f"[yellow]  -> Skipping L{i+1}: SSID atau BSSID kosong setelah parse.[/yellow]")
                 continue
 
             # Bersihkan rate
             rate = rate_str.split(" ")[0]
             if not rate.isdigit(): rate = "?"
 
-            # Keamanan & Ikon
-            security = security_str if security_str else "Open"
+            # Ikon Keamanan
             sec_icon = "🔒" if security != "Open" else "🔓"
 
             # Sinyal
@@ -133,13 +149,11 @@ def scan_wifi():
             else:
                  if DEBUG_PARSING: console.print(f"[yellow]  -> Warning L{i+1}: Signal '{signal_str}' tidak valid, set ke 0.[/yellow]")
 
-
             # Tambahkan ke daftar jika SSID unik (berdasarkan nama SSID hasil parse)
-            # PENTING: Gunakan SSID hasil parsing yang (semoga) sudah benar
             if ssid not in seen_ssids:
                 networks.append({
                     "bssid": bssid,
-                    "ssid": ssid, # <--- Simpan SSID yang sudah diparsing
+                    "ssid": ssid, # <-- SSID yang sudah bersih
                     "signal": signal,
                     "security": security,
                     "icon": sec_icon,
@@ -151,18 +165,15 @@ def scan_wifi():
                  if DEBUG_PARSING: console.print(f"[grey50]  -> Skipping L{i+1}: Duplicate SSID '{ssid}' already added.[/grey50]")
 
         else:
-            # Baris ini tidak punya cukup bagian (minimal 6)
-            console.print(f"[yellow]⚠️ Peringatan: Melewati baris L{i+1} format tidak terduga ({len(parts)} bagian):[/yellow] '{line}'")
-            if DEBUG_PARSING: console.print(f"[grey50]     Parts found: {parts}[/grey50]")
+            # Baris ini tidak cocok dengan pola Regex sama sekali
+            console.print(f"[yellow]⚠️ Peringatan: Melewati baris L{i+1} format tidak cocok Regex:[/yellow] '{line}'")
 
-    # ... (sisanya sama seperti v2, urutkan, etc.) ...
-
+    # ... (Sisa fungsi scan_wifi: logging hasil, sort, return) ...
     if DEBUG_PARSING and networks:
-        console.print("\n[grey50]-- DEBUG: Hasil Parsing Jaringan --[/grey50]")
+        console.print("\n[grey50]-- DEBUG: Hasil Parsing Jaringan (Setelah Regex & Unescape) --[/grey50]")
         for idx, net in enumerate(networks):
-             console.print(f"[grey50]  #{idx+1}: SSID='{net['ssid']}', Signal={net['signal']}%, Security='{net['security']}'[/grey50]")
+             console.print(f"[grey50]  #{idx+1}: SSID='[cyan]{net['ssid']}[/cyan]', Signal={net['signal']}%, Security='{net['security']}', BSSID='{net['bssid']}'[/grey50]")
         console.print("[grey50]-- Akhir DEBUG Hasil --[/grey50]\n")
-
 
     if not networks and raw_lines:
          console.print("[yellow]Tidak ada jaringan yang berhasil diparsing dari output nmcli.[/yellow]")
@@ -173,54 +184,65 @@ def scan_wifi():
     return networks
 
 
-# ... (Fungsi display_networks, connect_wifi, check_internet, connect_vpn tetap sama seperti v2) ...
+# ... (Fungsi display_networks, connect_wifi, check_internet, connect_vpn SAMA seperti v3) ...
+# Pastikan mereka menggunakan 'ssid' dari dictionary `net` yang sudah diparsing dgn benar.
 def display_networks(networks):
     """Menampilkan jaringan Wi-Fi dalam tabel."""
-    if not networks:
-        return
+    if not networks: return
     table = Table(title="📶 Jaringan Wi-Fi Tersedia", show_header=True, header_style="bold magenta")
     table.add_column("#", style="dim", width=3)
     table.add_column("SSID", style="cyan", min_width=20, no_wrap=True) # Tampilkan SSID hasil parse
     table.add_column("Sinyal", style="green", justify="right")
-    table.add_column("Keamanan", style="yellow")
+    table.add_column("Keamanan", style="yellow", max_width=25, overflow="ellipsis") # Batasi lebar & potong jika perlu
     table.add_column("Icon", style="dim")
     table.add_column("Rate(Mbps)", style="blue", justify="right")
 
     for i, net in enumerate(networks):
         signal_str = f"{net['signal']}%"
         rate_str = f"{net['rate']}" if net['rate'] != "?" else "[dim]?[/dim]"
-        table.add_row(str(i + 1), net["ssid"], signal_str, net["security"], net["icon"], rate_str)
+        # Escape markup Rich di SSID dan Security untuk mencegah error tampilan jika mengandung [ atau ]
+        display_ssid = net['ssid'].replace('[','\\[')
+        display_security = net['security'].replace('[','\\[')
+        table.add_row(str(i + 1), display_ssid, signal_str, display_security, net["icon"], rate_str)
     console.print(table)
 
 def connect_wifi(ssid, password=None):
     """Menghubungkan ke jaringan Wi-Fi yang dipilih."""
-    # Tambahkan debug print di sini juga untuk memastikan SSID yang DIKIRIM ke nmcli
-    console.print(f"[bold yellow]DEBUG:[/bold yellow] Mencoba koneksi nmcli dengan SSID: '[cyan]{ssid}[/cyan]'")
-    cmd = ["nmcli", "dev", "wifi", "connect", ssid] # Gunakan SSID yang sudah diparsing
+    # DEBUG untuk memastikan SSID yg dikirim ke NMCLI
+    console.print(f"[bold yellow]DEBUG:[/bold yellow] Mencoba koneksi nmcli dengan SSID: '[cyan]{ssid}[/cyan]'") # SSID harusnya sudah benar
+    cmd = ["nmcli", "dev", "wifi", "connect", ssid]
     if password:
         cmd.extend(["password", password])
 
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
         progress.add_task(f"Menghubungkan ke [cyan]'{ssid}'[/cyan]...", total=None)
-        result = run_command(cmd, timeout=60)
+        result = run_command(cmd, timeout=60) # Timeout bisa disesuaikan
 
-    if result and result.returncode == 0 and "successfully activated" in result.stdout:
+    if result and result.returncode == 0 and ("successfully activated" in result.stdout or "Connection successfully activated" in result.stdout): # Cek beberapa variasi pesan sukses
         console.print(f"[bold green]✔️ Berhasil terhubung ke Wi-Fi:[/bold green] [cyan]{ssid}[/cyan]")
         return True
     else:
         console.print(f"[bold red]❌ Gagal terhubung ke Wi-Fi:[/bold red] [cyan]{ssid}[/cyan]")
         stderr_msg = getattr(result, 'stderr', '').strip()
         stdout_msg = getattr(result, 'stdout', '').strip()
-        if stderr_msg: console.print(f"[red]   -> Detail Error (stderr): {stderr_msg}[/red]")
-        elif stdout_msg and ("Error:" in stdout_msg or "No network with SSID" in stdout_msg): # Tangkap error di stdout juga
-             console.print(f"[red]   -> Detail Error (stdout): {stdout_msg}[/red]")
-        elif result is None: console.print("[red]   -> Perintah koneksi timeout atau gagal dieksekusi.[/red]")
-        elif isinstance(result, subprocess.CalledProcessError): console.print(f"[red]   -> Perintah nmcli gagal dengan return code {result.returncode}.[/red]")
-        # Tambahkan saran jika errornya "No network with SSID"
-        if stderr_msg and "No network with SSID" in stderr_msg or stdout_msg and "No network with SSID" in stdout_msg:
-            console.print("[red]      (Pastikan SSID yang ditampilkan di tabel sudah benar dan jaringan masih tersedia)[/red]")
+        error_msg = stderr_msg if stderr_msg else stdout_msg # Prioritaskan stderr
+
+        if error_msg:
+             console.print(f"[red]   -> Detail Error: {error_msg}[/red]")
+             if "Secrets were required" in error_msg or "Invalid password" in error_msg:
+                 console.print("[red]      (Kemungkinan password salah atau tipe keamanan tidak cocok)[/red]")
+             elif "timeout" in error_msg.lower():
+                 console.print("[red]      (Waktu koneksi habis. Sinyal lemah atau masalah jaringan)[/red]")
+             elif "No network with SSID" in error_msg:
+                 console.print("[red]      (SSID tidak ditemukan oleh nmcli saat koneksi. Jaringan hilang atau SSID salah parse?)[/red]")
+                 console.print(f"[red]      (SSID yang dicoba: '{ssid}')[/red]")
+        elif result is None:
+             console.print("[red]   -> Perintah koneksi timeout atau gagal dieksekusi.[/red]")
+        elif isinstance(result, subprocess.CalledProcessError):
+             console.print(f"[red]   -> Perintah nmcli gagal dengan return code {result.returncode}.[/red]")
         return False
 
+# ... (check_internet, connect_vpn, main execution block sama seperti v3) ...
 def check_internet():
     """Memeriksa koneksi internet dengan ping."""
     cmd = ["ping", "-c", "1", "-W", "3", PING_HOST]
@@ -236,7 +258,7 @@ def check_internet():
         stdout_msg = getattr(result, 'stdout', '').strip()
         if stderr_msg: console.print(f"[red]   -> Detail Error: {stderr_msg}[/red]")
         elif stdout_msg: console.print(f"[yellow]   -> Output Ping: {stdout_msg}[/yellow]")
-        elif result is None: console.print("[red]   -> Perintah ping timeout atau gagal dieksekusi.[/red]")
+        elif result is None: console.print("[red]   -> Perintah ping timeout.[/red]")
         return False
 
 def connect_vpn(vpn_name):
@@ -245,16 +267,16 @@ def connect_vpn(vpn_name):
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
         progress.add_task(f"Mencoba menghubungkan ke VPN [magenta]'{vpn_name}'[/magenta]...", total=None)
         result = run_command(cmd, timeout=90)
-    if result and result.returncode == 0 and "successfully activated" in result.stdout:
+    if result and result.returncode == 0 and ("successfully activated" in result.stdout or "Connection successfully activated" in result.stdout):
         console.print(f"[bold green]✔️ Berhasil terhubung ke VPN:[/bold green] [magenta]{vpn_name}[/magenta]")
         return True
     else:
         console.print(f"[bold red]❌ Gagal terhubung ke VPN:[/bold red] [magenta]{vpn_name}[/magenta]")
         stderr_msg = getattr(result, 'stderr', '').strip()
         stdout_msg = getattr(result, 'stdout', '').strip()
-        if stderr_msg: console.print(f"[red]   -> Detail Error (stderr): {stderr_msg}[/red]")
-        elif stdout_msg and "Error:" in stdout_msg: console.print(f"[red]   -> Detail Error (stdout): {stdout_msg}[/red]")
-        elif result is None: console.print("[red]   -> Perintah koneksi VPN timeout atau gagal dieksekusi.[/red]")
+        error_msg = stderr_msg if stderr_msg else stdout_msg
+        if error_msg: console.print(f"[red]   -> Detail Error: {error_msg}[/red]")
+        elif result is None: console.print("[red]   -> Perintah koneksi VPN timeout.[/red]")
         elif isinstance(result, subprocess.CalledProcessError): console.print(f"[red]   -> Perintah nmcli gagal dengan return code {result.returncode}.[/red]")
 
         console.print("[yellow]-- Mencoba menampilkan daftar koneksi VPN yang tersedia --[/yellow]")
@@ -267,17 +289,14 @@ def connect_vpn(vpn_name):
         if vpn_connections:
             console.print("[yellow]   Koneksi VPN/WireGuard yang terdeteksi:[/yellow]")
             for vpn in vpn_connections: console.print(f"[yellow]   - [bold]{vpn}[/bold][/yellow]")
-            console.print(f"[yellow]   Pastikan nama '{vpn_name}' benar.[/yellow]")
         else:
             console.print("[yellow]   Tidak ada koneksi VPN/WireGuard ditemukan.[/yellow]")
         console.print("[yellow]-- Akhir daftar VPN --[/yellow]")
         return False
 
-
-# --- Main Execution ---
 if __name__ == "__main__":
-    # check_root() # Peringatan saja, tidak memaksa exit
-    console.print(Panel("[bold blue]🚀 Script Koneksi Wi-Fi & VPN (v3 - Fix Parsing) 🚀[/bold blue]", expand=False, border_style="blue"))
+    # check_root()
+    console.print(Panel("[bold blue]🚀 Script Koneksi Wi-Fi & VPN (v4 - Regex Parser) 🚀[/bold blue]", expand=False, border_style="blue"))
 
     networks = scan_wifi()
 
@@ -300,8 +319,8 @@ if __name__ == "__main__":
             choice_index = int(choice) - 1
             if 0 <= choice_index < len(networks):
                 selected_network = networks[choice_index]
-                # >>>>> DEBUG: Tampilkan SSID yang dipilih <<<<<
-                console.print(f"[bold yellow]DEBUG:[/bold yellow] Anda memilih Jaringan #{choice} dengan SSID: '[cyan]{selected_network['ssid']}[/cyan]'")
+                if DEBUG_PARSING: # Tampilkan SSID yg dipilih user dari list yg sdh diparse
+                     console.print(f"[bold yellow]DEBUG:[/bold yellow] Anda memilih Jaringan #{choice} -> SSID: '[cyan]{selected_network['ssid']}[/cyan]'")
             else:
                 console.print(f"[red]Pilihan tidak valid.[/red]")
         except ValueError:
@@ -310,11 +329,11 @@ if __name__ == "__main__":
              console.print("\n[yellow]Input dibatalkan.[/yellow]")
              sys.exit(1)
 
-    # Gunakan SSID dari selected_network yang sudah diparsing dengan benar
-    ssid_to_connect = selected_network["ssid"]
+    ssid_to_connect = selected_network["ssid"] # Ini sudah SSID yg bersih hasil regex
     password = None
     if selected_network["security"] != "Open":
         try:
+            # Pastikan prompt menampilkan SSID yg benar
             password = getpass.getpass(f"Masukkan password untuk [cyan]'{ssid_to_connect}'[/cyan] {selected_network['icon']}: ")
             if not password:
                  console.print("[yellow]Password tidak dimasukkan. Mencoba tanpa password...[/yellow]")
@@ -322,7 +341,7 @@ if __name__ == "__main__":
              console.print("\n[yellow]Input password dibatalkan.[/yellow]")
              sys.exit(1)
 
-    if connect_wifi(ssid_to_connect, password): # Pass SSID yang sudah benar
+    if connect_wifi(ssid_to_connect, password):
         console.print("[cyan]Memberi jeda beberapa detik...[/cyan]")
         time.sleep(5)
         if check_internet():
