@@ -23,7 +23,7 @@ APP_NAME = "Exora Spartan CLI"
 VERSION = "1.0"
 SPARTAN_SCRIPT = "spartan.py" # Pastikan nama file ini benar
 WIFI_SCRIPT = "wifi.py"       # Nama file script untuk Wifi
-AUTHOR = "YourNameHere" # Ganti dengan nama lu atau biarin kosong
+AUTHOR = "Syndicate Trader" # Ganti dengan nama lu atau biarin kosong
 
 # --- Helper Functions ---
 console = Console()
