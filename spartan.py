@@ -7,7 +7,7 @@ import datetime # Untuk timestamp
 import subprocess
 import json
 import os
-import getpass
+import getpass # Masih ada jika rich gagal, tapi prompt rich lebih diutamakan
 import sys
 import signal # Untuk menangani Ctrl+C
 import traceback # Untuk mencetak traceback error
@@ -33,7 +33,7 @@ except ImportError:
         def rule(self, *args, **kwargs): print("-" * 40)
         def clear(self): os.system('cls' if os.name == 'nt' else 'clear')
         def status(self, *args, **kwargs): return DummyStatus()
-        def input(self, *args, **kwargs): return input(*args)
+        def input(self, *args, **kwargs): return input(*args) # Fallback input standar
         def print_exception(self, **kwargs): traceback.print_exc()
     class DummyStatus:
         def __enter__(self): pass
@@ -50,9 +50,20 @@ except ImportError:
         def ask(*args, **kwargs):
             prompt_text = args[0] if args else ""
             default = kwargs.get('default', None)
+            # Abaikan 'password=True' jika rich tidak ada
+            # password = kwargs.get('password', False) # Parameter password tidak relevan untuk input() standar
+
             if default is not None:
                 prompt_text += f" [{default}]"
+
+            # Gunakan getpass jika password=True dan getpass tersedia (meski rich tidak ada)
+            # Namun, karena requestnya visible, kita tidak perlu getpass di sini
+            # if password and 'getpass' in sys.modules:
+            #     return getpass.getpass(prompt_text + ": ")
+
+            # Input biasa (visible)
             return input(prompt_text + ": ").strip()
+
     class Confirm:
          @staticmethod
          def ask(*args, **kwargs):
@@ -84,7 +95,11 @@ except ImportError:
     # Definisikan exception dummy jika library tidak ada agar script tidak crash
     class BinanceAPIException(Exception): pass
     class BinanceOrderException(Exception): pass
-    class Client: pass # Dummy class
+    class Client: # Dummy class
+        # Tambahkan konstanta dummy agar tidak error di Client.SIDE_BUY/SELL
+        SIDE_BUY = "BUY"
+        SIDE_SELL = "SELL"
+        ORDER_TYPE_MARKET = "MARKET"
 
 # --- Konfigurasi & Variabel Global ---
 CONFIG_FILE = "config.json"
@@ -108,27 +123,18 @@ DEFAULT_SETTINGS = {
 # Variabel global untuk mengontrol loop utama
 running = True
 
-# --- Kode Warna ANSI (Tidak dipakai jika Rich tersedia) --- RICH: Dikomentari
-# RESET = "\033[0m"
-# BOLD = "\033[1m"
-# RED = "\033[91m"
-# GREEN = "\033[92m"
-# YELLOW = "\033[93m"
-# BLUE = "\033[94m"
-# MAGENTA = "\033[95m"
-# CYAN = "\033[96m"
-
 # --- Fungsi Penanganan Sinyal (Ctrl+C) ---
 def signal_handler(sig, frame):
     global running
     # RICH: Gunakan console.print dengan style
     console.print(f"\n[bold yellow][WARN][/] Ctrl+C terdeteksi. Menghentikan program...")
     running = False
-    time.sleep(1) # Kurangi sleep agar lebih responsif
-    console.print(f"[bold red][EXIT][/] Keluar dari program.")
-    # RICH: Lakukan cleanup console jika perlu (biasanya tidak untuk exit langsung)
-    console.show_cursor(True)
-    sys.exit(0)
+    # Jangan exit paksa di sini, biarkan loop utama selesai dengan bersih
+    # time.sleep(1) # Kurangi sleep agar lebih responsif
+    # console.print(f"[bold red][EXIT][/] Keluar dari program.")
+    # # RICH: Lakukan cleanup console jika perlu (biasanya tidak untuk exit langsung)
+    # console.show_cursor(True)
+    # sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -162,8 +168,15 @@ def load_settings():
                     console.print(f"[yellow][WARN][/] 'execute_binance_orders' tidak valid, direset ke False.")
                     settings["execute_binance_orders"] = False
 
-                # Save back any corrections made
-                save_settings(settings, silent=True) # Simpan tanpa notifikasi ulang
+                # Pastikan semua key default ada, tambahkan jika belum ada di file lama
+                updated = False
+                for key, value in DEFAULT_SETTINGS.items():
+                    if key not in settings:
+                        settings[key] = value
+                        console.print(f"[yellow][WARN][/] Menambahkan kunci '{key}' yang hilang ke konfigurasi dengan nilai default.")
+                        updated = True
+                if updated:
+                    save_settings(settings, silent=True) # Simpan tanpa notifikasi ulang
 
         except json.JSONDecodeError:
             console.print(f"[bold red][ERROR][/] File konfigurasi '{CONFIG_FILE}' rusak. Menggunakan default & menyimpan ulang.")
@@ -222,7 +235,10 @@ def decode_mime_words(s):
                         except UnicodeDecodeError:
                              result.append(part.decode('cp1252', errors='replace'))
                 else:
-                     result.append(part.decode(encoding, errors='replace'))
+                     try:
+                         result.append(part.decode(encoding, errors='replace'))
+                     except LookupError: # Handle unknown encoding
+                         result.append(part.decode('utf-8', errors='replace')) # Fallback ke utf-8
             else:
                 result.append(part)
         return "".join(result)
@@ -234,6 +250,7 @@ def decode_mime_words(s):
 def get_text_from_email(msg):
     # ... (fungsi get_text_from_email tetap sama, tapi pakai console.print untuk warning) ...
     text_content = ""
+    html_content = ""
     if msg.is_multipart():
         for part in msg.walk():
             content_type = part.get_content_type()
@@ -246,17 +263,17 @@ def get_text_from_email(msg):
                     text_content += payload.decode(charset, errors='replace') # Ganti error decode
                 except Exception as e:
                     # RICH: Gunakan console.print untuk warning
-                    console.print(f"[yellow][WARN][/] Tidak bisa mendekode bagian email (multipart): {e}")
-            # Tambahkan: Coba ambil text/html jika text/plain tidak ada atau kosong
-            elif "text/html" in content_type and not text_content and "attachment" not in content_disposition.lower():
+                    console.print(f"[yellow][WARN][/] Tidak bisa mendekode bagian email (multipart/plain): {e}")
+            # Tambahkan: Coba ambil text/html jika bukan attachment
+            elif "text/html" in content_type and "attachment" not in content_disposition.lower():
                  try:
                     charset = part.get_content_charset() or 'utf-8'
                     payload = part.get_payload(decode=True)
                     # Ini akan berisi tag HTML, mungkin perlu dibersihkan nanti jika perlu
                     # Untuk tujuan keyword matching, ini mungkin sudah cukup
-                    text_content += payload.decode(charset, errors='replace')
+                    html_content += payload.decode(charset, errors='replace')
                  except Exception as e:
-                     console.print(f"[yellow][WARN][/] Tidak bisa mendekode bagian email (HTML): {e}")
+                     console.print(f"[yellow][WARN][/] Tidak bisa mendekode bagian email (multipart/html): {e}")
 
     else: # Bukan multipart
         content_type = msg.get_content_type()
@@ -269,15 +286,17 @@ def get_text_from_email(msg):
                  # RICH: Gunakan console.print untuk warning
                  console.print(f"[yellow][WARN][/] Tidak bisa mendekode body email (plain): {e}")
         # Coba ambil html jika plain tidak ada
-        elif "text/html" in content_type and not text_content:
+        elif "text/html" in content_type:
              try:
                  charset = msg.get_content_charset() or 'utf-8'
                  payload = msg.get_payload(decode=True)
-                 text_content = payload.decode(charset, errors='replace') # Mengandung HTML
+                 html_content = payload.decode(charset, errors='replace') # Mengandung HTML
              except Exception as e:
                   console.print(f"[yellow][WARN][/] Tidak bisa mendekode body email (HTML): {e}")
 
-    return text_content.lower() # Kembalikan dalam lowercase untuk matching
+    # Prioritaskan text/plain, jika kosong baru gunakan html
+    final_content = text_content if text_content else html_content
+    return final_content.lower() # Kembalikan dalam lowercase untuk matching
 
 # --- Fungsi Beep ---
 def trigger_beep(action):
@@ -295,6 +314,7 @@ def trigger_beep(action):
              console.print(f"[yellow][WARN][/] Aksi beep tidak dikenal '{action}'.")
     except FileNotFoundError:
         console.print(f"[yellow][WARN][/] Perintah 'beep' tidak ditemukan. Beep dilewati.")
+        console.print(f"[yellow]         (Untuk Linux, install 'beep': sudo apt-get install beep atau setara)[/]")
     except subprocess.CalledProcessError as e:
         console.print(f"[red][ERROR][/] Gagal menjalankan 'beep': {e}")
         if e.stderr: console.print(f"[red]         Stderr: {e.stderr.strip()}[/]")
@@ -316,11 +336,19 @@ def get_binance_client(settings):
             client = Client(settings['binance_api_key'], settings['binance_api_secret'])
             # Test koneksi (opsional tapi bagus)
             client.ping()
+            # Dapatkan info server time untuk cek sinkronisasi
+            server_time = client.get_server_time()
+            local_time = int(time.time() * 1000)
+            time_diff = abs(server_time['serverTime'] - local_time)
+            if time_diff > 1000: # Toleransi 1 detik
+                 console.print(f"[yellow][WARN][/] Perbedaan waktu signifikan ({time_diff}ms) antara server dan lokal. Mungkin perlu sinkronisasi NTP.")
             time.sleep(0.5) # Jeda untuk efek
         console.print(f"[green][BINANCE][/] Koneksi ke Binance API berhasil.")
         return client
     except BinanceAPIException as e:
         console.print(f"[bold red][BINANCE ERROR][/] Gagal terhubung/autentikasi ke Binance: {e}")
+        if e.code == -1021: # Timestamp error
+             console.print(f"[red]         -> Error Timestamp: Pastikan waktu sistem Anda sinkron (NTP).[/]")
         return None
     except Exception as e:
         console.print(f"[bold red][ERROR][/] Gagal membuat Binance client: {e}")
@@ -363,7 +391,8 @@ def execute_binance_order(client, settings, side):
             side_str = "[bold red]SELL[/]"
             base_qty = settings.get('sell_base_quantity', 0.0)
             if base_qty <= 0:
-                 console.print(f"[red][BINANCE ERROR][/] Kuantitas Jual (sell_base_quantity) harus > 0.")
+                 console.print(f"[red][BINANCE ERROR][/] Kuantitas Jual (sell_base_quantity) harus > 0 untuk eksekusi SELL.")
+                 console.print(f"[yellow]         (Jika tidak ingin SELL, atur 'sell_base_quantity' ke 0 dan pastikan email tidak memicu 'sell')[/]")
                  return False
             order_details = {
                 'symbol': pair,
@@ -379,6 +408,8 @@ def execute_binance_order(client, settings, side):
         console.print(f"[magenta][BINANCE][/] Mencoba eksekusi: {action_desc}...")
         # RICH: Gunakan status saat order sedang diproses
         with console.status(f"[cyan]Mengirim order {side_str} ke Binance...", spinner="arrow3"):
+            # Gunakan test order jika ingin simulasi tanpa eksekusi nyata
+            # order_result = client.create_test_order(**order_details)
             order_result = client.create_order(**order_details)
             time.sleep(0.5) # Jeda efek
 
@@ -394,12 +425,18 @@ def execute_binance_order(client, settings, side):
         result_table.add_row("Status", f"[green]{order_result.get('status')}[/]")
 
         # Info fill (harga rata-rata dan kuantitas terisi)
-        if order_result.get('fills'):
-            total_qty = sum(float(f['qty']) for f in order_result['fills'])
-            total_quote_qty = sum(float(f['qty']) * float(f['price']) for f in order_result['fills'])
+        fills = order_result.get('fills', [])
+        if fills:
+            total_qty = sum(float(f['qty']) for f in fills)
+            total_quote_qty = sum(float(f['qty']) * float(f['price']) for f in fills)
             avg_price = total_quote_qty / total_qty if total_qty else 0
-            result_table.add_row("Avg Price", f"{avg_price:.8f}") # Sesuaikan presisi jika perlu
+            # Tentukan presisi harga berdasarkan pair jika memungkinkan (memerlukan info pair tambahan)
+            # Untuk simpelnya, pakai 8 desimal
+            result_table.add_row("Avg Price", f"{avg_price:.8f}")
+            # Tentukan presisi kuantitas (base asset)
             result_table.add_row("Filled Qty", f"{total_qty:.8f}")
+            # Tampilkan juga total quote value (berguna untuk BUY)
+            result_table.add_row("Total Quote", f"{total_quote_qty:.4f}")
 
         console.print(result_table)
         return True
@@ -409,7 +446,23 @@ def execute_binance_order(client, settings, side):
         # Contoh error spesifik:
         if e.code == -2010: console.print(f"[red]         -> Kemungkinan saldo tidak cukup.[/]")
         elif e.code == -1121: console.print(f"[red]         -> Trading pair '{pair}' tidak valid.[/]")
-        elif e.code == -1013 or 'MIN_NOTIONAL' in e.message: console.print(f"[red]         -> Order size terlalu kecil (cek minimum order/MIN_NOTIONAL atau LOT_SIZE).[/]")
+        elif e.code == -1013 or 'MIN_NOTIONAL' in e.message or 'LOT_SIZE' in e.message:
+            console.print(f"[red]         -> Order size tidak valid. Cek filter '[bold]MIN_NOTIONAL[/]' dan '[bold]LOT_SIZE[/]' untuk pair {pair}.[/]")
+            # Coba tampilkan filter jika bisa didapat
+            try:
+                info = client.get_symbol_info(pair)
+                if info and 'filters' in info:
+                    console.print(f"[blue]         Filters for {pair}:[/]")
+                    for f in info['filters']:
+                        if f['filterType'] == 'MIN_NOTIONAL': console.print(f"[blue]           MIN_NOTIONAL: {f.get('minNotional', 'N/A')}[/]")
+                        if f['filterType'] == 'LOT_SIZE': console.print(f"[blue]           LOT_SIZE - minQty: {f.get('minQty', 'N/A')}, maxQty: {f.get('maxQty', 'N/A')}, stepSize: {f.get('stepSize', 'N/A')}[/]")
+                        if f['filterType'] == 'MARKET_LOT_SIZE': console.print(f"[blue]           MARKET_LOT_SIZE - minQty: {f.get('minQty', 'N/A')}, maxQty: {f.get('maxQty', 'N/A')}, stepSize: {f.get('stepSize', 'N/A')}[/]")
+
+            except Exception as ie:
+                 console.print(f"[yellow]           (Tidak bisa mengambil info filter: {ie})[/]")
+
+        elif e.code == -1021: # Timestamp error
+             console.print(f"[red]         -> Error Timestamp: Pastikan waktu sistem Anda sinkron (NTP).[/]")
         return False
     except BinanceOrderException as e:
         console.print(f"[bold red][BINANCE ORDER ERROR][/] Gagal eksekusi order: {e.status_code} - {e.message}")
@@ -462,51 +515,68 @@ def process_email(mail, email_id, settings, binance_client): # Tambah binance_cl
              time.sleep(0.2)
         full_content = (subject.lower() + " " + body)
 
-        if target_keyword_lower in full_content:
+        if not body and not subject:
+             console.print(f"[yellow][WARN][/] Email {email_id_str} kosong (tidak ada subjek atau body).")
+        elif target_keyword_lower in full_content:
             console.print(f"[green][INFO][/] Keyword target '[bold]{settings['target_keyword']}[/]' ditemukan.")
             try:
                 # Cari trigger SETELAH target
                 target_index = full_content.find(target_keyword_lower)
-                trigger_index = -1
-                if target_index != -1:
-                    # Cari trigger setelah target ditemukan
-                     trigger_index = full_content.find(trigger_keyword_lower, target_index + len(target_keyword_lower))
+                search_start_index = target_index + len(target_keyword_lower)
+                trigger_index = full_content.find(trigger_keyword_lower, search_start_index)
 
                 if trigger_index != -1:
                     start_word_index = trigger_index + len(trigger_keyword_lower)
-                    text_after_trigger = full_content[start_word_index:].lstrip()
+                    # Ambil teks setelah trigger dan bersihkan spasi di awal/akhir
+                    text_after_trigger = full_content[start_word_index:].strip()
+                    # Ambil kata pertama setelah trigger
                     words_after_trigger = text_after_trigger.split(maxsplit=1)
 
                     if words_after_trigger:
+                        # Bersihkan tanda baca dari kata aksi
                         action_word = words_after_trigger[0].strip('.,!?:;()[]{}').lower()
                         action_style = "[bold green]" if action_word == "buy" else "[bold red]" if action_word == "sell" else "[bold yellow]"
                         console.print(f"[green][INFO][/] Keyword trigger '[bold]{settings['trigger_keyword']}[/]' ditemukan. Kata berikutnya: {action_style}{action_word.upper()}[/]")
 
                         # --- Trigger Aksi (Beep dan/atau Binance) ---
                         order_executed = False # Tandai apakah order sudah dicoba
+                        binance_enabled = settings.get("execute_binance_orders")
+
                         if action_word == "buy":
                             trigger_beep("buy")
                             # Coba eksekusi Binance BUY
-                            if binance_client and settings.get("execute_binance_orders"):
-                               execute_binance_order(binance_client, settings, Client.SIDE_BUY)
-                               order_executed = True
-                            elif settings.get("execute_binance_orders") and not binance_client:
-                                console.print(f"[yellow][WARN][/] Eksekusi Binance aktif tapi client tidak valid/tersedia.")
+                            if binance_enabled:
+                                if binance_client:
+                                   order_executed = execute_binance_order(binance_client, settings, Client.SIDE_BUY)
+                                else:
+                                   console.print(f"[yellow][WARN][/] Eksekusi Binance aktif tapi client tidak valid/tersedia.")
+                            # else: # Jika tidak aktif, tidak perlu log (sudah log saat start)
+                            #    console.print("[yellow][BINANCE][/] Eksekusi Binance dinonaktifkan.")
 
                         elif action_word == "sell":
-                            trigger_beep("sell")
-                            # Coba eksekusi Binance SELL
-                            if binance_client and settings.get("execute_binance_orders"):
-                               execute_binance_order(binance_client, settings, Client.SIDE_SELL)
-                               order_executed = True
-                            elif settings.get("execute_binance_orders") and not binance_client:
-                               console.print(f"[yellow][WARN][/] Eksekusi Binance aktif tapi client tidak valid/tersedia.")
+                            # Cek dulu kuantitas jual > 0 sebelum beep/eksekusi
+                            if settings.get('sell_base_quantity', 0.0) > 0:
+                                trigger_beep("sell")
+                                # Coba eksekusi Binance SELL
+                                if binance_enabled:
+                                    if binance_client:
+                                       order_executed = execute_binance_order(binance_client, settings, Client.SIDE_SELL)
+                                    else:
+                                       console.print(f"[yellow][WARN][/] Eksekusi Binance aktif tapi client tidak valid/tersedia.")
+                                # else:
+                                #    console.print("[yellow][BINANCE][/] Eksekusi Binance dinonaktifkan.")
+                            else:
+                                console.print(f"[yellow][WARN][/] Aksi 'sell' terdeteksi, tapi 'sell_base_quantity' di pengaturan adalah 0. Tidak ada aksi SELL.")
+
                         else:
                             console.print(f"[yellow][WARN][/] Kata setelah '[bold]{settings['trigger_keyword']}[/]' ({action_style}{action_word.upper()}[/]) bukan 'buy' atau 'sell'. Tidak ada aksi market.")
 
-                        # RICH: Pesan jika eksekusi aktif tapi tidak jalan karena error sebelumnya
-                        if not order_executed and settings.get("execute_binance_orders") and action_word in ["buy", "sell"] and binance_client:
-                             console.print(f"[yellow][BINANCE][/] Eksekusi tidak dilakukan (lihat pesan error di atas).")
+                        # RICH: Pesan jika eksekusi aktif tapi tidak jalan karena error sebelumnya atau client tdk ada
+                        if binance_enabled and action_word in ["buy", "sell"] and not order_executed:
+                             if action_word == "sell" and settings.get('sell_base_quantity', 0.0) <= 0:
+                                 pass # Sudah ada warning spesifik di atas
+                             else:
+                                 console.print(f"[yellow][BINANCE][/] Eksekusi {action_word.upper()} tidak dilakukan (lihat pesan error/status client di atas).")
 
 
                     else:
@@ -535,25 +605,30 @@ def process_email(mail, email_id, settings, binance_client): # Tambah binance_cl
     except Exception as e:
         console.print(f"[bold red][ERROR] Gagal memproses email ID {email_id_str}:[/]")
         console.print_exception(show_locals=False)
+        console.rule(style="dim red") # Rule error
+
 
 # --- Fungsi Listening Utama ---
 def start_listening(settings):
     """Memulai loop untuk memeriksa email baru dan menyiapkan client Binance."""
     global running
-    running = True
+    running = True # Pastikan running True saat memulai
     mail = None
     binance_client = None # Inisialisasi client Binance
-    wait_time = 30 # Waktu tunggu sebelum reconnect
+    wait_time = 30 # Waktu tunggu sebelum reconnect (detik)
     connection_attempts = 0
-    max_conn_attempts = 3 # Batasi percobaan koneksi berturut-turut
+    max_conn_attempts = 5 # Batasi percobaan koneksi berturut-turut sebelum give up
 
     # RICH: Helper untuk status panel
     def generate_status_panel(status_text, email_count=0, last_check_ts=None):
         status_color = "cyan"
-        if "Gagal" in status_text or "Error" in status_text or "Terputus" in status_text:
+        if "Gagal" in status_text or "Error" in status_text or "Terputus" in status_text or "Reconnect" in status_text:
             status_color = "yellow"
-        elif "Mendengarkan" in status_text:
-            status_color = "green"
+        elif "Mendengarkan" in status_text or "Menunggu" in status_text :
+             if "Tidak ada email baru" not in status_text:
+                 status_color = "green"
+             else:
+                 status_color = "blue" # Warna beda saat idle
 
         table = Table.grid(padding=(0, 1), expand=True)
         table.add_column(justify="left", ratio=1)
@@ -568,16 +643,22 @@ def start_listening(settings):
     if settings.get("execute_binance_orders"):
         if not BINANCE_AVAILABLE:
              console.print(f"[bold red][FATAL][/] Eksekusi Binance diaktifkan tapi library python-binance tidak ada! Nonaktifkan atau install library.")
-             running = False # Hentikan sebelum loop utama
-             return
+             console.print("Tekan Enter untuk kembali ke menu...")
+             input()
+             return # Kembali ke menu utama
         console.print(Panel("[cyan]Mencoba menginisialisasi koneksi Binance API...[/]", border_style="cyan"))
         binance_client = get_binance_client(settings)
         if not binance_client:
             console.print(f"[bold red][FATAL][/] Gagal menginisialisasi Binance Client. Periksa API Key/Secret dan koneksi.")
             console.print(f"[yellow]         Eksekusi order tidak akan berjalan. Anda bisa menonaktifkannya di Pengaturan.[/]")
-            # Kita tidak menghentikan program, mungkin user hanya ingin notifikasi email
-            # running = False
-            # return
+            confirmed = Confirm.ask("Tetap lanjutkan hanya dengan listener email?", default=False)
+            if not confirmed:
+                console.print("[yellow]Kembali ke menu utama.[/]")
+                time.sleep(1)
+                return # Kembali ke menu utama
+            else:
+                console.print("[yellow]Melanjutkan tanpa eksekusi Binance.[/]")
+                settings["execute_binance_orders"] = False # Nonaktifkan paksa untuk sesi ini
         else:
             console.print(Panel("[green]Binance Client siap.[/]", border_style="green"))
     else:
@@ -588,169 +669,238 @@ def start_listening(settings):
     last_check_timestamp = None
     current_status_text = "Inisialisasi..."
 
-    with Live(generate_status_panel(current_status_text), refresh_per_second=4, console=console, vertical_overflow="visible") as live:
-        while running:
-            try:
-                # --- Koneksi IMAP ---
-                if not mail or mail.state != 'SELECTED':
-                    connection_attempts += 1
-                    if connection_attempts > max_conn_attempts:
-                         console.print(f"[bold red][FATAL][/] Gagal terhubung ke IMAP setelah {max_conn_attempts} percobaan. Periksa detail & koneksi.")
-                         running = False
-                         break
+    try:
+        with Live(generate_status_panel(current_status_text), refresh_per_second=4, console=console, vertical_overflow="visible") as live:
+            while running:
+                mail = None # Reset mail object untuk memastikan koneksi baru
+                try:
+                    # --- Koneksi IMAP ---
+                    # Coba hubungkan dan login sebelum loop cek email
+                    connection_attempts = 0
+                    while not mail and running:
+                        connection_attempts += 1
+                        if connection_attempts > max_conn_attempts:
+                             console.print(f"\n[bold red][FATAL][/] Gagal terhubung ke IMAP setelah {max_conn_attempts} percobaan. Periksa detail & koneksi.")
+                             running = False
+                             break # Keluar loop koneksi
 
-                    current_status_text = f"Menghubungkan ke IMAP ({settings['imap_server']})... ({connection_attempts}/{max_conn_attempts})"
-                    live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
-                    mail = imaplib.IMAP4_SSL(settings['imap_server'], timeout=30) # Tambah timeout
-                    # console.print(f"[green][SYS][/] Terhubung ke {settings['imap_server']}") # Log jika perlu
-
-                    current_status_text = f"Login sebagai {settings['email_address']}..."
-                    live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
-                    mail.login(settings['email_address'], settings['app_password'])
-                    # console.print(f"[green][SYS][/] Login email berhasil sebagai [bold]{settings['email_address']}[/]") # Log jika perlu
-
-                    mail.select("inbox")
-                    current_status_text = "Memulai mode mendengarkan di INBOX..."
-                    live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
-                    console.print(Panel(f"Mendengarkan email untuk [bold cyan]{settings['email_address']}[/] di INBOX", style="bold green", title="Listener Aktif"))
-                    console.rule(style="green")
-                    connection_attempts = 0 # Reset counter jika berhasil
-
-                # --- Loop Cek Email ---
-                while running:
-                    try:
-                        # Cek koneksi IMAP
-                        with console.status("[dim]Cek koneksi IMAP...", spinner="point"):
-                            status, _ = mail.noop()
-                            time.sleep(0.2)
-                        if status != 'OK':
-                            current_status_text = f"Koneksi IMAP NOOP gagal ({status}). Reconnect..."
-                            live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
-                            console.print(f"[yellow][WARN][/] Koneksi IMAP NOOP gagal ({status}). Mencoba reconnect...")
-                            break # Keluar loop inner untuk reconnect
-                    except Exception as NopErr:
-                         current_status_text = f"Koneksi IMAP terputus ({type(NopErr).__name__}). Reconnect..."
-                         live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
-                         console.print(f"[yellow][WARN][/] Koneksi IMAP terputus ({NopErr}). Mencoba reconnect...")
-                         break
-
-                    # Cek koneksi Binance jika client ada
-                    if binance_client and settings.get("execute_binance_orders"):
+                        current_status_text = f"Menghubungkan ke IMAP ({settings['imap_server']})... ({connection_attempts}/{max_conn_attempts})"
+                        live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
                         try:
-                             with console.status("[dim]Cek koneksi Binance...", spinner="point"):
-                                 binance_client.ping()
-                                 time.sleep(0.2)
-                        except Exception as PingErr:
-                             console.print(f"[yellow][WARN][/] Ping ke Binance API gagal ({PingErr}). Mencoba membuat ulang client...")
-                             binance_client = get_binance_client(settings) # Coba buat ulang
-                             if not binance_client:
-                                  console.print(f"[red]       Gagal membuat ulang Binance client. Eksekusi mungkin gagal.[/]")
-                                  # Tidak break, biarkan email tetap jalan jika bisa
-                             time.sleep(5) # Beri jeda setelah error ping
+                            mail_attempt = imaplib.IMAP4_SSL(settings['imap_server'], timeout=30) # Tambah timeout
+                            # console.print(f"[green][SYS][/] Terhubung ke {settings['imap_server']}") # Log jika perlu
 
-                    # Cari email UNSEEN
-                    current_status_text = "Mencari email baru (UNSEEN)..."
-                    live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
-                    status, messages = mail.search(None, '(UNSEEN)')
-                    last_check_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                            current_status_text = f"Login sebagai {settings['email_address']}..."
+                            live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+                            status, response = mail_attempt.login(settings['email_address'], settings['app_password'])
+                            if status != 'OK':
+                                raise imaplib.IMAP4.error(f"Login Gagal: {response}")
+                            # console.print(f"[green][SYS][/] Login email berhasil sebagai [bold]{settings['email_address']}[/]") # Log jika perlu
 
-                    if status != 'OK':
-                         current_status_text = f"Gagal mencari email ({status}). Reconnect..."
-                         live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
-                         console.print(f"[red][ERROR][/] Gagal mencari email: {status}")
-                         break
+                            status, response = mail_attempt.select("inbox")
+                            if status != 'OK':
+                                raise imaplib.IMAP4.error(f"Gagal memilih INBOX: {response}")
 
-                    email_ids = messages[0].split()
-                    if email_ids:
-                        console.print(f"\n[bold green][INFO][/] Menemukan {len(email_ids)} email baru!")
-                        console.rule(style="green")
-                        for email_id in email_ids:
-                            if not running: break
-                            # Kirim client Binance ke process_email
-                            process_email(mail, email_id, settings, binance_client)
-                            processed_email_count += 1
-                        if not running: break
-                        # console.rule(style="green") # Pindah rule ke akhir process_email
-                        current_status_text = f"Selesai proses {len(email_ids)} email. Mendengarkan..."
-                        live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
-                        console.print(f"[green][INFO][/] Selesai memproses. Kembali mendengarkan...")
-                    else:
-                        # Tidak ada email baru, tunggu interval
-                        wait_interval = settings['check_interval_seconds']
-                        current_status_text = f"Tidak ada email baru. Menunggu {wait_interval} detik..."
-                        # RICH: Gunakan Progress bar untuk animasi menunggu
-                        with Progress(
-                            "[progress.description]{task.description}",
-                            Spinner("dots", style="cyan"),
-                            "[progress.percentage]{task.percentage:>3.0f}%",
-                            console=console, # Targetkan progress ke console yang sama
-                            transient=True # Hapus progress bar setelah selesai
-                        ) as progress:
-                            wait_task = progress.add_task("[cyan]Menunggu...", total=wait_interval)
-                            for _ in range(wait_interval):
+                            mail = mail_attempt # Assign ke mail jika semua berhasil
+                            console.print(Panel(f"Mendengarkan email untuk [bold cyan]{settings['email_address']}[/] di INBOX", style="bold green", title="Listener Aktif"))
+                            console.rule(style="green")
+                            connection_attempts = 0 # Reset counter jika berhasil
+                            current_status_text = "Mendengarkan di INBOX..."
+                            live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+
+
+                        except (imaplib.IMAP4.error, socket.timeout, OSError, ConnectionError, socket.gaierror) as conn_err:
+                             console.print(f"\n[red][ERROR][/] Gagal koneksi/login ({connection_attempts}/{max_conn_attempts}): {conn_err}")
+                             if isinstance(conn_err, imaplib.IMAP4.error) and ("authentication failed" in str(conn_err).lower() or "invalid credentials" in str(conn_err).lower()):
+                                 console.print(f"[bold red][FATAL][/] Login Email GAGAL! Periksa alamat email dan App Password.")
+                                 running = False # Hentikan loop utama
+                                 break # Keluar dari loop koneksi
+                             current_status_text = f"Gagal koneksi IMAP ({type(conn_err).__name__}). Retrying..."
+                             live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+                             if running: # Tunggu sebelum coba lagi jika masih running
+                                for i in range(wait_time):
+                                    if not running: break
+                                    live.update(generate_status_panel(f"Gagal koneksi. Retry dalam {wait_time-i}s...", processed_email_count, last_check_timestamp))
+                                    time.sleep(1)
+                        except Exception as general_conn_err:
+                             console.print(f"\n[red][ERROR][/] Kesalahan tak terduga saat koneksi/login IMAP ({connection_attempts}/{max_conn_attempts}):")
+                             console.print_exception(show_locals=False)
+                             current_status_text = f"Error IMAP ({type(general_conn_err).__name__}). Retrying..."
+                             live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+                             if running: # Tunggu sebelum coba lagi jika masih running
+                                for i in range(wait_time):
+                                     if not running: break
+                                     live.update(generate_status_panel(f"Error koneksi. Retry dalam {wait_time-i}s...", processed_email_count, last_check_timestamp))
+                                     time.sleep(1)
+
+
+                    if not running: # Jika gagal konek dan running jadi False
+                        break # Keluar dari loop utama (while running)
+
+
+                    # --- Loop Cek Email ---
+                    while running and mail and mail.state == 'SELECTED':
+                        try:
+                            # Cek koneksi IMAP (NOOP)
+                            # dengan status agar tidak terlalu spam log jika tidak ada error
+                            noop_status_text = "[dim]Cek koneksi IMAP...[/]"
+                            with console.status(noop_status_text, spinner="point") as status_ctx:
+                                status, _ = mail.noop()
+                                time.sleep(0.2)
+                            if status != 'OK':
+                                current_status_text = f"Koneksi IMAP NOOP gagal ({status}). Reconnecting..."
+                                live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+                                console.print(f"\n[yellow][WARN][/] Koneksi IMAP NOOP gagal ({status}). Mencoba reconnect...")
+                                break # Keluar loop inner untuk reconnect
+
+                        except (imaplib.IMAP4.abort, imaplib.IMAP4.readonly, OSError) as NopErr:
+                             current_status_text = f"Koneksi IMAP terputus ({type(NopErr).__name__}). Reconnecting..."
+                             live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+                             console.print(f"\n[yellow][WARN][/] Koneksi IMAP terputus ({NopErr}). Mencoba reconnect...")
+                             break # Keluar loop inner untuk reconnect
+
+                        # Cek koneksi Binance jika client ada dan aktif
+                        if binance_client and settings.get("execute_binance_orders"):
+                            try:
+                                 with console.status("[dim]Cek koneksi Binance...", spinner="point"):
+                                     binance_client.ping()
+                                     time.sleep(0.2)
+                            except Exception as PingErr:
+                                 console.print(f"\n[yellow][WARN][/] Ping ke Binance API gagal ({PingErr}). Mencoba membuat ulang client...")
+                                 binance_client = get_binance_client(settings) # Coba buat ulang
+                                 if not binance_client:
+                                      console.print(f"[red]       Gagal membuat ulang Binance client. Eksekusi order mungkin gagal.[/]")
+                                      # Nonaktifkan sementara agar tidak terus mencoba?
+                                      # settings["execute_binance_orders"] = False # Atau biarkan, mungkin koneksi pulih
+                                 time.sleep(5) # Beri jeda setelah error ping
+
+                        # Cari email UNSEEN
+                        search_status_text = "Mencari email baru (UNSEEN)..."
+                        live.update(generate_status_panel(search_status_text, processed_email_count, last_check_timestamp))
+                        status, messages = mail.search(None, '(UNSEEN)')
+                        last_check_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+
+                        if status != 'OK':
+                             current_status_text = f"Gagal mencari email ({status}). Reconnecting..."
+                             live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+                             console.print(f"\n[red][ERROR][/] Gagal mencari email: {status}")
+                             break # Keluar loop inner untuk reconnect
+
+                        email_ids = messages[0].split()
+                        if email_ids:
+                            console.print(f"\n[bold green][INFO][/] Menemukan {len(email_ids)} email baru!")
+                            console.rule(style="green")
+                            for email_id in email_ids:
                                 if not running: break
-                                progress.update(wait_task, advance=1)
-                                live.update(generate_status_panel(f"Mendengarkan... ({wait_interval - progress.tasks[0].completed}/{wait_interval}s)", processed_email_count, last_check_timestamp))
-                                time.sleep(1)
-                        if not running: break
-                        # Update status setelah selesai menunggu
-                        current_status_text = "Mendengarkan..."
+                                # Kirim client Binance ke process_email
+                                process_email(mail, email_id, settings, binance_client)
+                                processed_email_count += 1
+                            if not running: break
+                            # console.rule(style="green") # Pindah rule ke akhir process_email
+                            current_status_text = f"Selesai proses {len(email_ids)} email. Mendengarkan..."
+                            live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+                            console.print(f"[green][INFO][/] Selesai memproses. Kembali mendengarkan...")
+                        else:
+                            # Tidak ada email baru, tunggu interval
+                            wait_interval = settings['check_interval_seconds']
+                            current_status_text = f"Tidak ada email baru. Menunggu {wait_interval} detik..."
+                            # RICH: Gunakan Progress bar untuk animasi menunggu
+                            # Reset last_check_timestamp di sini agar update saat menunggu
+                            last_check_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                            live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+
+                            with Progress(
+                                "[progress.description]{task.description}",
+                                Spinner("dots", style="blue"), # Warna biru saat idle
+                                console=console, # Targetkan progress ke console yang sama
+                                transient=True # Hapus progress bar setelah selesai
+                            ) as progress:
+                                wait_task = progress.add_task(f"[blue]Menunggu {wait_interval}s...", total=wait_interval)
+                                for i in range(wait_interval):
+                                    if not running: break
+                                    progress.update(wait_task, advance=1)
+                                    # Update status di Live juga
+                                    live.update(generate_status_panel(f"Mendengarkan... ({wait_interval - (i+1)}s)", processed_email_count, last_check_timestamp))
+                                    time.sleep(1)
+                            if not running: break
+                            # Update status setelah selesai menunggu
+                            current_status_text = "Mendengarkan..."
+                            live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
+
+                    # Tutup koneksi IMAP jika keluar loop inner (karena error atau signal stop)
+                    if mail:
+                        state = mail.state
+                        if state == 'SELECTED':
+                            try:
+                                with console.status("[dim]Menutup mailbox INBOX...", spinner="point"):
+                                   mail.close()
+                                   time.sleep(0.1)
+                                state = 'AUTH' # Update state setelah close
+                            except Exception as e:
+                                console.print(f"[yellow][WARN] Error saat close mailbox: {e}[/]")
+                        if state == 'AUTH':
+                             try:
+                                 with console.status("[dim]Logout dari IMAP...", spinner="point"):
+                                     mail.logout()
+                                     time.sleep(0.1)
+                             except Exception as e:
+                                 console.print(f"[yellow][WARN] Error saat logout: {e}[/]")
+                    mail = None # Set None agar reconnect di loop luar jika running masih True
+
+                except (imaplib.IMAP4.error, imaplib.IMAP4.abort) as e:
+                    console.print(f"\n[bold red][ERROR][/] Kesalahan IMAP di loop: {e}")
+                    current_status_text = f"Kesalahan IMAP ({type(e).__name__}). Reconnecting..."
+                    if "authentication failed" in str(e).lower() or "invalid credentials" in str(e).lower():
+                        console.print(f"[bold red][FATAL][/] Login Email GAGAL! Periksa alamat email dan App Password.")
+                        running = False # Hentikan loop utama
+                        break # Keluar dari loop utama
+                    # Coba reconnect setelah jeda
+                    # (Handling reconnect sudah ada di awal loop while running)
+                except (ConnectionError, OSError, socket.error, socket.gaierror, socket.timeout) as e:
+                     console.print(f"\n[bold red][ERROR][/] Kesalahan Koneksi Jaringan: {e}")
+                     current_status_text = f"Kesalahan Koneksi ({type(e).__name__}). Reconnecting..."
+                     console.print(f"[yellow][WARN][/] Periksa koneksi internet.")
+                     # Coba reconnect setelah jeda
+                except Exception as e:
+                    console.print(f"\n[bold red][ERROR][/] Kesalahan tak terduga di loop listener:")
+                    console.print_exception(show_locals=False)
+                    current_status_text = f"Kesalahan Tak Terduga ({type(e).__name__}). Reconnecting..."
+                    # Coba reconnect setelah jeda
+                finally:
+                    # Pastikan mail di-logout jika masih ada state aneh
+                    if mail and mail.state != 'LOGOUT':
+                        try: mail.logout()
+                        except Exception: pass
+                    mail = None # Set None untuk trigger reconnect jika perlu
+
+                    if running:
+                        # Jeda sebelum retry reconnect jika loop utama masih jalan
+                        wait_msg = f"Mencoba reconnect dalam {wait_time} detik..."
+                        live.update(generate_status_panel(f"{current_status_text} {wait_msg}", processed_email_count, last_check_timestamp))
+                        with Progress("[progress.description]{task.description}", Spinner("circle", style="yellow"), console=console, transient=True) as progress:
+                             wait_task = progress.add_task(f"[yellow]{wait_msg}", total=wait_time)
+                             for _ in range(wait_time):
+                                 if not running: break
+                                 progress.update(wait_task, advance=1)
+                                 time.sleep(1)
+                    else: # Jika running sudah False (misal dari signal handler)
+                        current_status_text = "Menghentikan listener..."
                         live.update(generate_status_panel(current_status_text, processed_email_count, last_check_timestamp))
-
-                # Tutup koneksi IMAP jika keluar loop inner (untuk reconnect)
-                if mail and mail.state == 'SELECTED':
-                    try:
-                        with console.status("[dim]Menutup koneksi IMAP...", spinner="point"):
-                           mail.close()
-                           time.sleep(0.2)
-                    except Exception: pass
-                if mail and mail.state == 'AUTH':
-                    try:
-                        with console.status("[dim]Logout dari IMAP...", spinner="point"):
-                            mail.logout()
-                            time.sleep(0.2)
-                    except Exception: pass
-                mail = None # Set None agar reconnect di loop luar
-
-            except (imaplib.IMAP4.error, imaplib.IMAP4.abort) as e:
-                console.print(f"[bold red][ERROR][/] Kesalahan IMAP: {e}")
-                current_status_text = f"Kesalahan IMAP ({type(e).__name__}). Reconnect..."
-                if "authentication failed" in str(e).lower() or "invalid credentials" in str(e).lower():
-                    console.print(f"[bold red][FATAL][/] Login Email GAGAL! Periksa alamat email dan App Password.")
-                    running = False # Hentikan loop utama
-                    break # Keluar dari loop utama
-                # Coba reconnect setelah jeda
-                # (Handling reconnect sudah ada di awal loop while)
-            except (ConnectionError, OSError, socket.error, socket.gaierror) as e:
-                 console.print(f"[bold red][ERROR][/] Kesalahan Koneksi: {e}")
-                 current_status_text = f"Kesalahan Koneksi ({type(e).__name__}). Reconnect..."
-                 console.print(f"[yellow][WARN][/] Periksa koneksi internet.")
-                 # Coba reconnect setelah jeda
-            except Exception as e:
-                console.print(f"[bold red][ERROR][/] Kesalahan tak terduga di loop utama:")
-                console.print_exception(show_locals=False)
-                current_status_text = f"Kesalahan Tak Terduga ({type(e).__name__}). Reconnect..."
-                # Coba reconnect setelah jeda
-            finally:
-                # Pastikan mail di-logout jika masih ada state aneh
-                if mail and mail.state != 'LOGOUT':
-                    try: mail.logout()
-                    except Exception: pass
-                mail = None # Set None untuk trigger reconnect
-
-                if running:
-                    # RICH: Jeda sebelum retry dengan status
-                    wait_msg = f"Mencoba lagi dalam {wait_time} detik..."
-                    live.update(generate_status_panel(f"{current_status_text} {wait_msg}", processed_email_count, last_check_timestamp))
-                    with Progress("[progress.description]{task.description}", Spinner("circle", style="yellow"), console=console, transient=True) as progress:
-                         wait_task = progress.add_task(f"[yellow]{wait_msg}", total=wait_time)
-                         for _ in range(wait_time):
-                             if not running: break
-                             progress.update(wait_task, advance=1)
-                             time.sleep(1)
+                        time.sleep(0.5) # Jeda singkat sebelum keluar Live
 
 
-    console.print(Panel("[yellow]Mode mendengarkan dihentikan.[/]", border_style="yellow"))
+    except KeyboardInterrupt: # Ditangkap di luar Live context
+        console.print(f"\n[yellow][WARN][/] KeyboardInterrupt diterima (di luar loop utama). Menghentikan...")
+        running = False
+    except Exception as outer_e: # Error tak terduga di luar Live context
+        console.print(f"\n[bold red][ERROR KRITIS][/] Error di luar loop utama listener:")
+        console.print_exception(show_locals=True)
+        running = False
+    finally:
+        # Pastikan 'running' False jika keluar dari try utama ini
+        running = False
+        console.print(Panel("[yellow]Mode mendengarkan dihentikan.[/]", border_style="yellow"))
+        # Tidak perlu logout IMAP lagi di sini karena sudah dihandle di inner finally/break
 
 
 # --- Fungsi Menu Pengaturan ---
@@ -768,7 +918,8 @@ def show_settings(settings):
         # --- Email Settings ---
         settings_table.add_row("[bold]--- Email ---[/]", "")
         settings_table.add_row("1. Alamat Email", settings['email_address'] or "[italic grey50]Belum diatur[/]")
-        settings_table.add_row("2. App Password", ('*' * len(settings['app_password'])) if settings['app_password'] else "[italic grey50]Belum diatur[/]") # Sembunyikan password
+        # --- PERUBAHAN: Tampilkan password asli ---
+        settings_table.add_row("2. App Password", settings['app_password'] or "[italic grey50]Belum diatur[/]")
         settings_table.add_row("3. Server IMAP", settings['imap_server'])
         settings_table.add_row("4. Interval Cek", f"{settings['check_interval_seconds']} detik")
         settings_table.add_row("5. Keyword Target", f"'{settings['target_keyword']}'")
@@ -780,7 +931,8 @@ def show_settings(settings):
         binance_status = f"[green]Tersedia[/]" if BINANCE_AVAILABLE else f"[red]Tidak Tersedia (Install 'python-binance')[/]"
         settings_table.add_row("Library Status", binance_status)
         settings_table.add_row("7. API Key", settings['binance_api_key'] or "[italic grey50]Belum diatur[/]")
-        settings_table.add_row("8. API Secret", ('*' * len(settings['binance_api_secret'])) if settings['binance_api_secret'] else "[italic grey50]Belum diatur[/]") # Sembunyikan secret
+        # --- PERUBAHAN: Tampilkan secret asli ---
+        settings_table.add_row("8. API Secret", settings['binance_api_secret'] or "[italic grey50]Belum diatur[/]")
         settings_table.add_row("9. Trading Pair", settings['trading_pair'] or "[italic grey50]Belum diatur[/]")
         settings_table.add_row("10. Buy Quote Qty", f"{settings['buy_quote_quantity']} (e.g., USDT)")
         settings_table.add_row("11. Sell Base Qty", f"{settings['sell_base_quantity']} (e.g., BTC)")
@@ -795,17 +947,17 @@ def show_settings(settings):
         console.print(" [bold yellow]E[/] - Edit Pengaturan")
         console.print(" [bold yellow]K[/] - Kembali ke Menu Utama")
         console.rule()
-        choice = Prompt.ask("Pilih opsi", choices=["E", "K"], default="K").lower()
+        choice = Prompt.ask("Pilih opsi", choices=["E", "K"], default="K").upper() # Upper case biar konsisten
 
-        if choice == 'e':
+        if choice == 'E':
             console.print(Panel(Text("Edit Pengaturan", justify="center", style="bold magenta"), border_style="magenta"))
 
             # RICH: Gunakan Prompt.ask untuk input yang lebih terstruktur
             # --- Edit Email ---
             console.print("[bold cyan]--- Email ---[/]")
             settings['email_address'] = Prompt.ask(" 1. Email", default=settings['email_address'])
-            # Gunakan password=True untuk menyembunyikan input password
-            new_password = Prompt.ask(" 2. App Password (biarkan kosong jika tidak berubah)", default="", password=True)
+            # --- PERUBAHAN: Hapus password=True ---
+            new_password = Prompt.ask(" 2. App Password (masukkan nilai baru atau tekan Enter jika tidak berubah)", default=settings['app_password'])
             if new_password: settings['app_password'] = new_password
             settings['imap_server'] = Prompt.ask(" 3. Server IMAP", default=settings['imap_server'])
             while True:
@@ -824,7 +976,8 @@ def show_settings(settings):
                  console.print(f"[yellow]   (Library Binance tidak terinstall, pengaturan Binance mungkin tidak berpengaruh)[/]")
 
             settings['binance_api_key'] = Prompt.ask(" 7. API Key", default=settings['binance_api_key'])
-            new_secret = Prompt.ask(" 8. API Secret (biarkan kosong jika tidak berubah)", default="", password=True)
+            # --- PERUBAHAN: Hapus password=True ---
+            new_secret = Prompt.ask(" 8. API Secret (masukkan nilai baru atau tekan Enter jika tidak berubah)", default=settings['binance_api_secret'])
             if new_secret: settings['binance_api_secret'] = new_secret
             settings['trading_pair'] = Prompt.ask(" 9. Trading Pair (e.g., BTCUSDT)", default=settings['trading_pair']).upper()
 
@@ -851,7 +1004,7 @@ def show_settings(settings):
             console.print("\n[green]Pengaturan diperbarui. Tekan Enter untuk kembali...[/]")
             input() # Jeda sederhana
 
-        elif choice == 'k':
+        elif choice == 'K':
             break # Keluar dari loop pengaturan
 
 # --- Fungsi Menu Utama ---
@@ -875,7 +1028,7 @@ def main_menu():
         menu_table.add_column()
 
         exec_label = f" & [bold cyan]Binance[/]" if settings.get("execute_binance_orders") else ""
-        menu_table.add_row("1.", f"Mulai Mendengarkan (Email{exec_label})")
+        menu_table.add_row("[bold]1.[/]", f"Mulai Mendengarkan (Email{exec_label})")
         menu_table.add_row("[cyan]2.[/]", "Pengaturan")
         menu_table.add_row("[yellow]3.[/]", "Keluar")
         console.print(menu_table)
@@ -886,11 +1039,11 @@ def main_menu():
         status_table.add_column(style="dim", width=15)
         status_table.add_column()
 
-        email_status = "[green]OK[/]" if settings['email_address'] else "[red]X[/]"
-        pass_status = "[green]OK[/]" if settings['app_password'] else "[red]X[/]"
-        api_status = "[green]OK[/]" if settings['binance_api_key'] else "[red]X[/]"
-        secret_status = "[green]OK[/]" if settings['binance_api_secret'] else "[red]X[/]"
-        pair_status = f"[green]{settings['trading_pair']}[/]" if settings['trading_pair'] else "[red]X[/]"
+        email_status = "[green]OK[/]" if settings['email_address'] else "[red]X (Kosong)[/]"
+        pass_status = "[green]OK[/]" if settings['app_password'] else "[red]X (Kosong)[/]"
+        api_status = "[green]OK[/]" if settings['binance_api_key'] else "[red]X (Kosong)[/]"
+        secret_status = "[green]OK[/]" if settings['binance_api_secret'] else "[red]X (Kosong)[/]"
+        pair_status = f"[green]{settings['trading_pair']}[/]" if settings['trading_pair'] else "[red]X (Kosong)[/]"
         exec_mode = f"[bold green]AKTIF[/]" if settings.get("execute_binance_orders") else f"[bold yellow]NONAKTIF[/]"
 
         status_table.add_row("Status Email:", f"[{email_status}] Email | [{pass_status}] App Pass")
@@ -915,39 +1068,71 @@ def main_menu():
 
             error_messages = []
             if not valid_email:
-                error_messages.append("[red]Pengaturan Email (Alamat/App Password) belum lengkap![/]")
+                error_messages.append("[red]- Pengaturan Email (Alamat/App Password) belum lengkap![/]")
             if execute_binance:
                 if not BINANCE_AVAILABLE:
-                    error_messages.append("[red]Eksekusi Binance aktif tapi library 'python-binance' tidak ditemukan![/]")
+                    error_messages.append("[red]- Eksekusi Binance aktif tapi library 'python-binance' tidak ditemukan![/]")
                 elif not valid_binance_creds:
-                     error_messages.append("[red]Pengaturan Binance (API/Secret/Pair) belum lengkap![/]")
-                elif not valid_binance_buy_qty:
-                     error_messages.append("[red]Kuantitas Beli (buy_quote_quantity) harus lebih besar dari 0.[/]")
+                     error_messages.append("[red]- Pengaturan Binance (API/Secret/Pair) belum lengkap untuk eksekusi![/]")
+                if not valid_binance_buy_qty:
+                     error_messages.append("[red]- Kuantitas Beli (buy_quote_quantity) harus lebih besar dari 0.[/]")
                 # Tidak perlu error jika sell_base_quantity = 0, kecuali jika ada logika khusus yg mengharuskan sell bisa dieksekusi
                 # elif not valid_binance_sell_qty: # Komentari ini jika 0 valid
-                #      error_messages.append("[red]Kuantitas Jual (sell_base_quantity) harus 0 atau lebih besar.[/]")
+                #      error_messages.append("[red]- Kuantitas Jual (sell_base_quantity) harus 0 atau lebih besar.[/]")
 
             if error_messages:
-                console.print(Panel("\n".join(error_messages) + "\n\n[yellow]Silakan masuk ke menu 'Pengaturan' (pilihan 2).[/]",
+                console.print(Panel("\n".join(error_messages) + "\n\n[yellow]Silakan masuk ke menu 'Pengaturan' (pilihan 2) untuk melengkapi.[/]",
                                     title="[bold red]Validasi Gagal[/]", border_style="red", padding=(1,2)))
-                time.sleep(4)
+                console.print("Tekan Enter untuk kembali...")
+                input()
             else:
                 # Siap memulai
                 clear_screen()
                 mode = "Email & Binance Order" if execute_binance else "Email Listener Only"
                 console.print(Panel(f"Memulai Mode: [bold green]{mode}[/]", border_style="green", title="🚀 Memulai Listener 🚀"))
                 start_listening(settings)
-                console.print("\n[yellow]Kembali ke Menu Utama...[/]")
+                # Setelah listener berhenti (Ctrl+C atau error fatal)
+                console.print("\n[yellow]Listener dihentikan. Kembali ke Menu Utama...[/]")
+                # Reset 'running' flag di sini untuk memastikan menu berfungsi normal lagi
+                global running
+                running = True # Reset agar menu bisa jalan lagi
                 time.sleep(2)
         elif choice == '2':
             show_settings(settings)
             settings = load_settings() # Load ulang jika ada perubahan
         elif choice == '3':
             console.print(f"\n[bold cyan]Terima kasih! Sampai jumpa! 👋[/]")
+            # Pastikan cursor terlihat saat keluar
+            if RICH_AVAILABLE: console.show_cursor(True)
             sys.exit(0)
 
 # --- Entry Point ---
 if __name__ == "__main__":
+    original_excepthook = sys.excepthook # Simpan excepthook asli
+
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        """Custom exception handler to ensure cursor is shown."""
+        if issubclass(exc_type, KeyboardInterrupt):
+             # Signal handler sudah cukup baik, tapi ini fallback jika lolos
+             console.print(f"\n[yellow][WARN][/] Program dihentikan paksa (KeyboardInterrupt).")
+        else:
+            # Untuk error lain, tampilkan traceback yang rapi pakai Rich
+            console.rule("[bold red]===== ERROR KRITIS =====[/]", style="red")
+            console.print_exception(show_locals=True) # Tampilkan local var untuk debug
+            console.rule(style="red")
+            console.print(f"\n[bold red]Terjadi error kritis yang tidak tertangani: {exc_value}[/]")
+            console.print("[bold red]Program akan keluar.[/]")
+
+        # Penting: Selalu tampilkan cursor sebelum exit
+        if RICH_AVAILABLE:
+            console.show_cursor(True)
+
+        # Panggil excepthook asli jika perlu (biasanya tidak untuk exit langsung)
+        # original_excepthook(exc_type, exc_value, exc_traceback)
+        sys.exit(1) # Keluar dengan kode error
+
+    sys.excepthook = handle_exception # Set custom exception handler
+
     try:
         # RICH: Cek ketersediaan library di awal
         if not RICH_AVAILABLE:
@@ -956,18 +1141,22 @@ if __name__ == "__main__":
             time.sleep(2) # Beri waktu untuk membaca warning
         main_menu()
     except KeyboardInterrupt:
-        # Signal handler sudah menangani ini, tapi sebagai fallback
-        console.print(f"\n[yellow][WARN][/] Program dihentikan paksa.")
-        sys.exit(1)
-    except Exception as e:
-        console.rule("[bold red]===== ERROR KRITIS =====[/]", style="red")
-        # RICH: Gunakan console.print_exception
-        console.print_exception(show_locals=True) # Tampilkan local var untuk debug
-        console.rule(style="red")
-        console.print(f"\n[bold red]Terjadi error kritis yang tidak tertangani: {e}[/]")
-        console.print("[bold red]Program akan keluar.[/]")
-        sys.exit(1)
+         # Ini seharusnya sudah ditangani oleh signal handler atau excepthook,
+         # tapi sebagai jaring pengaman terakhir.
+         if RICH_AVAILABLE: console.show_cursor(True)
+         console.print(f"\n[yellow][WARN][/] Keluar karena KeyboardInterrupt.")
+         sys.exit(1)
+    except SystemExit as e:
+         # Tangkap SystemExit agar bisa memastikan cursor tampil
+         if RICH_AVAILABLE: console.show_cursor(True)
+         sys.exit(e.code) # Keluar dengan kode exit yang sama
+    # Error lain akan ditangani oleh sys.excepthook
     finally:
-         # RICH: Pastikan cursor terlihat saat keluar
+         # Pastikan cursor terlihat dalam kondisi apapun saat keluar dari main block
+         # (meskipun excepthook seharusnya sudah melakukannya)
          if RICH_AVAILABLE:
-            console.show_cursor(True)
+            # Coba pastikan cursor visible, abaikan jika error
+            try:
+                console.show_cursor(True)
+            except Exception:
+                pass
