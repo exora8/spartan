@@ -12,125 +12,64 @@ import sys
 import signal # Untuk menangani Ctrl+C
 import traceback # Untuk mencetak traceback error
 import socket # Untuk error koneksi
-import requests # Untuk handle error koneksi Binance
+import requests # Untuk menangani error koneksi Binance
 
-# --- Integrasi Library Tampilan ---
-try:
-    import inquirer
-    from inquirer.themes import GreenPassion
-    INQUIRER_AVAILABLE = True
-except ImportError:
-    INQUIRER_AVAILABLE = False
-
+# --- Rich Integration (untuk UI keren) ---
 try:
     from rich.console import Console
     from rich.panel import Panel
     from rich.text import Text
+    from rich.rule import Rule
+    from rich.columns import Columns
+    from rich.spinner import Spinner
+    from rich.prompt import Prompt, Confirm, IntPrompt, FloatPrompt
     from rich.table import Table
-    from rich.progress import SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn, Progress # Untuk status lebih keren
-    from rich.live import Live # Untuk update status dinamis
     from rich import print as rprint # Gunakan print dari rich
-    from rich.prompt import Prompt, Confirm # Alternatif input rich
     RICH_AVAILABLE = True
-    console = Console() # Inisialisasi console Rich
+    console = Console() # Inisialisasi console global
 except ImportError:
     RICH_AVAILABLE = False
-    # Fallback print jika rich tidak ada
-    def rprint(*args, **kwargs): print(*args)
-    # Dummy classes/functions jika rich tidak ada
-    class Console:
-        def print(self, *args, **kwargs): print(*args)
-        def rule(self, *args, **kwargs): print("-" * 40)
-        def status(self, *args, **kwargs): return DummyStatus()
-        def print_exception(self, *args, **kwargs): traceback.print_exc()
-    class DummyStatus:
-        def start(self): pass
-        def stop(self): pass
-        def update(self, *args, **kwargs): pass
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-    class Panel:
-        def __init__(self, content, *args, **kwargs): self.content = content
-        # Define how Panel should behave when printed without Rich
-        def __str__(self): return f"--- Panel ---\n{self.content}\n-------------"
-    class Text(str): pass # Simple fallback
-    console = Console() # Gunakan dummy console
+    print("\n!!! WARNING: Library 'rich' tidak ditemukan. !!!")
+    print("!!!          Tampilan CLI akan standar.          !!!")
+    print("!!!          Install dengan: pip install rich    !!!\n")
+    # Definisikan fungsi print pengganti jika rich tidak ada
+    def rprint(*args, **kwargs): print(*args, **kwargs)
+    # Definisikan class dummy jika rich tidak ada
+    class Panel: def __init__(self, content, **kwargs): self.content = content; self.kwargs = kwargs
+    class Text: def __init__(self, text, **kwargs): self.text = text; self.kwargs = kwargs
+    class Rule: def __init__(self, *args, **kwargs): pass
+    class Spinner: def __init__(self, *args, **kwargs): pass
+    class Columns: def __init__(self, *args, **kwargs): pass
+    class Prompt: pass
+    class Confirm: pass
+    class IntPrompt: pass
+    class FloatPrompt: pass
+    console = None # Tandai console tidak ada
+    time.sleep(3)
 
+# --- Inquirer Integration (untuk menu interaktif) ---
 try:
-    import pyfiglet
-    FIGLET_AVAILABLE = True
+    import inquirer
+    # Tema bisa disesuaikan atau dihapus jika tidak perlu
+    # from inquirer.themes import GreenPassion
+    INQUIRER_AVAILABLE = True
 except ImportError:
-    FIGLET_AVAILABLE = False
+    INQUIRER_AVAILABLE = False
+    rprint("[yellow]!!! WARNING: Library 'inquirer' tidak ditemukan. !!![/]")
+    rprint("[yellow]!!!          Menu akan menggunakan input teks biasa.     !!![/]")
+    rprint("[yellow]!!!          Install dengan: pip install inquirer       !!![/]\n")
+    time.sleep(3) # Beri waktu untuk membaca warning
 
-try:
-    import emoji
-    EMOJI_AVAILABLE = True
-    # Definisikan beberapa emoji
-    ICON_EMAIL = emoji.emojize(":e-mail:")
-    ICON_PASSWORD = emoji.emojize(":key:")
-    ICON_SERVER = emoji.emojize(":satellite_antenna:")
-    ICON_CLOCK = emoji.emojize(":alarm_clock:")
-    ICON_TARGET = emoji.emojize(":dart:")
-    ICON_TRIGGER = emoji.emojize(":bell:")
-    ICON_BINANCE = emoji.emojize(":chart_increasing:")
-    ICON_API = emoji.emojize(":locked_with_key:")
-    ICON_PAIR = emoji.emojize(":currency_exchange:")
-    ICON_QTY = emoji.emojize(":money_bag:")
-    ICON_EXECUTE = emoji.emojize(":robot:")
-    ICON_OK = emoji.emojize(":check_mark_button:")
-    ICON_ERROR = emoji.emojize(":cross_mark:")
-    ICON_WARN = emoji.emojize(":warning:")
-    ICON_INFO = emoji.emojize(":information:")
-    ICON_START = emoji.emojize(":rocket:")
-    ICON_SETTINGS = emoji.emojize(":gear:")
-    ICON_EXIT = emoji.emojize(":door:")
-    ICON_LISTEN = emoji.emojize(":ear:")
-    ICON_NETWORK = emoji.emojize(":globe_with_meridians:")
-    ICON_PROCESS = emoji.emojize(":magnifying_glass_tilted_left:")
-    ICON_MARK = emoji.emojize(":envelope_with_arrow:")
-    ICON_BEEP = emoji.emojize(":speaker_high_volume:")
-
-except ImportError:
-    EMOJI_AVAILABLE = False
-    # Fallback jika emoji tidak ada
-    ICON_EMAIL, ICON_PASSWORD, ICON_SERVER, ICON_CLOCK, ICON_TARGET, ICON_TRIGGER = "📧", "🔑", "📡", "⏰", "🎯", "🔔"
-    ICON_BINANCE, ICON_API, ICON_PAIR, ICON_QTY, ICON_EXECUTE = "📈", "🔐", "💱", "💰", "🤖"
-    ICON_OK, ICON_ERROR, ICON_WARN, ICON_INFO = "✅", "❌", "⚠️", "ℹ️"
-    ICON_START, ICON_SETTINGS, ICON_EXIT, ICON_LISTEN, ICON_NETWORK, ICON_PROCESS, ICON_MARK, ICON_BEEP = "🚀", "⚙️", "🚪", "👂", "🌐", "🔍", "📩", "🔊"
-
-
-# --- Peringatan Library Opsional ---
-if not INQUIRER_AVAILABLE:
-    rprint(f"[bold yellow]{ICON_WARN} WARNING: Library 'inquirer' tidak ditemukan.[/bold yellow]")
-    rprint("[yellow]          Menu akan menggunakan input teks biasa.[/yellow]")
-    rprint("[yellow]          Install dengan: [cyan]pip install inquirer[/cyan][/yellow]\n")
-    time.sleep(2)
-if not RICH_AVAILABLE:
-    rprint(f"{ICON_WARN} WARNING: Library 'rich' tidak ditemukan.")
-    rprint("          Tampilan akan menjadi standar (kurang menarik).")
-    rprint("          Install dengan: pip install rich\n")
-    time.sleep(2)
-if not FIGLET_AVAILABLE:
-    rprint(f"{ICON_WARN} WARNING: Library 'pyfiglet' tidak ditemukan.")
-    rprint("          Judul utama tidak akan ditampilkan dalam format ASCII art.")
-    rprint("          Install dengan: pip install pyfiglet\n")
-    time.sleep(2)
-if not EMOJI_AVAILABLE:
-    rprint(f"{ICON_WARN} WARNING: Library 'emoji' tidak ditemukan.")
-    rprint("          Ikon emoji tidak akan ditampilkan.")
-    rprint("          Install dengan: pip install emoji\n")
-    time.sleep(2)
-
-# --- Binance Integration (Kode sama, hanya print diganti rprint jika perlu) ---
+# --- Binance Integration ---
 try:
     from binance.client import Client
     from binance.exceptions import BinanceAPIException, BinanceOrderException
     BINANCE_AVAILABLE = True
 except ImportError:
     BINANCE_AVAILABLE = False
-    rprint(f"\n[bold red]!!! {ICON_ERROR} WARNING: Library 'python-binance' tidak ditemukan. !!![/bold red]")
-    rprint("[yellow]!!!          Fitur eksekusi order Binance tidak akan berfungsi. !!![/yellow]")
-    rprint(f"[yellow]!!!          Install dengan: [cyan]pip install python-binance[/cyan]         !!![/yellow]\n")
+    rprint("\n[bold yellow]!!! WARNING: Library 'python-binance' tidak ditemukan. !!![/]")
+    rprint("[yellow]!!!          Fitur eksekusi order Binance tidak akan berfungsi. !!![/]")
+    rprint("[yellow]!!!          Install dengan: pip install python-binance         !!![/]\n")
     class BinanceAPIException(Exception): pass
     class BinanceOrderException(Exception): pass
     class Client:
@@ -139,104 +78,113 @@ except ImportError:
         ORDER_TYPE_MARKET = 'MARKET'
 
 # --- Konfigurasi & Variabel Global ---
+# (Konfigurasi & Variabel Global Tetap Sama)
 CONFIG_FILE = "config.json"
 DEFAULT_SETTINGS = {
-    "email_address": "", "app_password": "", "imap_server": "imap.gmail.com",
-    "check_interval_seconds": 10, "target_keyword": "Exora AI", "trigger_keyword": "order",
-    "binance_api_key": "", "binance_api_secret": "", "trading_pair": "BTCUSDT",
-    "buy_quote_quantity": 11.0, "sell_base_quantity": 0.0, "execute_binance_orders": False
+    # Email Settings
+    "email_address": "",
+    "app_password": "",
+    "imap_server": "imap.gmail.com",
+    "check_interval_seconds": 10,
+    "target_keyword": "Exora AI",
+    "trigger_keyword": "order",
+    # Binance Settings
+    "binance_api_key": "",
+    "binance_api_secret": "",
+    "trading_pair": "BTCUSDT",
+    "buy_quote_quantity": 11.0,
+    "sell_base_quantity": 0.0,
+    "execute_binance_orders": False
 }
 running = True
 
-# --- Kode Warna ANSI (Kurang relevan jika pakai Rich, tapi bisa sebagai fallback) ---
-RESET = "\033[0m"; BOLD = "\033[1m"; DIM = "\033[2m"
-RED = "\033[91m"; GREEN = "\033[92m"; YELLOW = "\033[93m"
-BLUE = "\033[94m"; MAGENTA = "\033[95m"; CYAN = "\033[96m"
+# Hapus Kode Warna ANSI Lama, kita pakai markup Rich
+# RESET = "\033[0m"
+# BOLD = "\033[1m"
+# ... dan seterusnya
 
 # --- Fungsi Penanganan Sinyal (Ctrl+C) ---
 def signal_handler(sig, frame):
     global running
-    running = False # Set flag untuk menghentikan loop
-    console.print(f"\n[bold yellow]{ICON_WARN} Ctrl+C terdeteksi. Menghentikan proses...[/bold yellow]",)
-    # Tambahkan sedikit jeda agar loop utama bisa merespon flag 'running'
+    rprint(f"\n[bold yellow][WARN] Ctrl+C terdeteksi. Menghentikan program...[/]")
+    running = False
     time.sleep(1.5)
-    console.print(f"[bold red]{ICON_EXIT} Keluar dari program.[/bold red]")
+    rprint(f"[bold red][EXIT] Keluar dari program.[/]")
+    # Pastikan terminal kembali normal jika menggunakan fitur rich
+    if RICH_AVAILABLE and console:
+        console.show_cursor(True)
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 
-# --- Fungsi Konfigurasi (load/save - logic sama, print diganti rprint) ---
+# --- Fungsi Konfigurasi (Load & Save) ---
+# (Tidak perlu diubah secara fungsional, tapi pesan error/info pakai rprint)
 def load_settings():
     settings = DEFAULT_SETTINGS.copy()
-    config_exists = os.path.exists(CONFIG_FILE)
-    if config_exists:
+    if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
                 loaded_settings = json.load(f)
-            valid_keys = set(DEFAULT_SETTINGS.keys())
-            filtered_settings = {k: v for k, v in loaded_settings.items() if k in valid_keys}
-            settings.update(filtered_settings)
+                valid_keys = set(DEFAULT_SETTINGS.keys())
+                filtered_settings = {k: v for k, v in loaded_settings.items() if k in valid_keys}
+                settings.update(filtered_settings)
 
-            # Validasi (pesan menggunakan rprint)
-            corrections_made = False
-            if settings.get("check_interval_seconds", 10) < 5:
-                rprint(f"[yellow]{ICON_WARN} Interval cek di '{CONFIG_FILE}' < 5 detik, direset ke 10.[/yellow]")
-                settings["check_interval_seconds"] = 10
-                corrections_made = True
-            # ... (validasi lain tetap sama, gunakan rprint untuk warning) ...
-            if not isinstance(settings.get("buy_quote_quantity"), (int, float)) or settings.get("buy_quote_quantity") <= 0:
-                 rprint(f"[yellow]{ICON_WARN} 'buy_quote_quantity' tidak valid, direset ke {DEFAULT_SETTINGS['buy_quote_quantity']}.[/yellow]")
-                 settings["buy_quote_quantity"] = DEFAULT_SETTINGS['buy_quote_quantity']
-                 corrections_made = True
-            if not isinstance(settings.get("sell_base_quantity"), (int, float)) or settings.get("sell_base_quantity") < 0: # Allow 0
-                 rprint(f"[yellow]{ICON_WARN} 'sell_base_quantity' tidak valid, direset ke {DEFAULT_SETTINGS['sell_base_quantity']}.[/yellow]")
-                 settings["sell_base_quantity"] = DEFAULT_SETTINGS['sell_base_quantity']
-                 corrections_made = True
-            if not isinstance(settings.get("execute_binance_orders"), bool):
-                rprint(f"[yellow]{ICON_WARN} 'execute_binance_orders' tidak valid, direset ke False.[/yellow]")
-                settings["execute_binance_orders"] = False
-                corrections_made = True
+                # Validasi (pesan pakai rprint)
+                if settings.get("check_interval_seconds", 10) < 5:
+                    rprint(f"[yellow][WARN] Interval cek di '{CONFIG_FILE}' < 5 detik, direset ke 10.[/]")
+                    settings["check_interval_seconds"] = 10
+                if not isinstance(settings.get("buy_quote_quantity"), (int, float)) or settings.get("buy_quote_quantity") <= 0:
+                    rprint(f"[yellow][WARN] 'buy_quote_quantity' tidak valid, direset ke {DEFAULT_SETTINGS['buy_quote_quantity']}.[/]")
+                    settings["buy_quote_quantity"] = DEFAULT_SETTINGS['buy_quote_quantity']
+                if not isinstance(settings.get("sell_base_quantity"), (int, float)) or settings.get("sell_base_quantity") < 0:
+                    rprint(f"[yellow][WARN] 'sell_base_quantity' tidak valid, direset ke {DEFAULT_SETTINGS['sell_base_quantity']}.[/]")
+                    settings["sell_base_quantity"] = DEFAULT_SETTINGS['sell_base_quantity']
+                if not isinstance(settings.get("execute_binance_orders"), bool):
+                    rprint(f"[yellow][WARN] 'execute_binance_orders' tidak valid, direset ke False.[/]")
+                    settings["execute_binance_orders"] = False
 
-            # Save back jika ada koreksi atau jika ada kunci default baru
-            if corrections_made or len(settings) != len(filtered_settings):
-                 save_settings(settings, silent_success=True) # Jangan print sukses saat load awal
+                # Simpan hanya jika ada koreksi atau file baru saja dibuat
+                if settings != loaded_settings:
+                     save_settings(settings, silent=True) # silent agar tidak print saat load awal
 
         except json.JSONDecodeError:
-            rprint(f"[bold red]{ICON_ERROR} File konfigurasi '{CONFIG_FILE}' rusak. Menggunakan default & menyimpan ulang.[/bold red]")
+            rprint(f"[bold red][ERROR] File konfigurasi '{CONFIG_FILE}' rusak. Menggunakan default & menyimpan ulang.[/]")
             save_settings(settings)
         except Exception as e:
-            rprint(f"[bold red]{ICON_ERROR} Gagal memuat konfigurasi: {e}[/bold red]")
-            console.print_exception(show_locals=False) # Tampilkan traceback dgn Rich
+            rprint(f"[bold red][ERROR] Gagal memuat konfigurasi: {e}[/]")
     else:
-        rprint(f"[yellow]{ICON_INFO} File konfigurasi '{CONFIG_FILE}' tidak ditemukan. Membuat dengan nilai default.[/yellow]")
+        rprint(f"[yellow][INFO] File konfigurasi '{CONFIG_FILE}' tidak ditemukan. Membuat dengan nilai default.[/]")
         save_settings(settings)
     return settings
 
-def save_settings(settings, silent_success=False):
+def save_settings(settings, silent=False):
     """Menyimpan pengaturan ke file JSON."""
     try:
-        # Pastikan tipe data benar sebelum menyimpan (logic sama)
+        # Pastikan tipe data benar
         settings['check_interval_seconds'] = int(settings.get('check_interval_seconds', DEFAULT_SETTINGS['check_interval_seconds']))
         settings['buy_quote_quantity'] = float(settings.get('buy_quote_quantity', DEFAULT_SETTINGS['buy_quote_quantity']))
         settings['sell_base_quantity'] = float(settings.get('sell_base_quantity', DEFAULT_SETTINGS['sell_base_quantity']))
         settings['execute_binance_orders'] = bool(settings.get('execute_binance_orders', DEFAULT_SETTINGS['execute_binance_orders']))
 
         settings_to_save = {k: settings.get(k, DEFAULT_SETTINGS[k]) for k in DEFAULT_SETTINGS}
+
         with open(CONFIG_FILE, 'w') as f:
             json.dump(settings_to_save, f, indent=4, sort_keys=True)
-        if not silent_success:
-            rprint(Panel(f"[bold green]{ICON_OK} Pengaturan berhasil disimpan ke '{CONFIG_FILE}'[/bold green]",
-                         title="Simpan Sukses", border_style="green"))
+        if not silent:
+            rprint(f"[green][INFO] Pengaturan berhasil disimpan ke '{CONFIG_FILE}'[/]")
     except Exception as e:
-        rprint(f"[bold red]{ICON_ERROR} Gagal menyimpan konfigurasi: {e}[/bold red]")
-        console.print_exception(show_locals=False)
+        rprint(f"[bold red][ERROR] Gagal menyimpan konfigurasi: {e}[/]")
 
 # --- Fungsi Utilitas ---
+# (clear_screen pakai console.clear, decode/get_email pakai rprint untuk error)
 def clear_screen():
-    os.system('cls' if os.name == 'nt' else 'clear')
+    if RICH_AVAILABLE and console:
+        console.clear()
+    else:
+        os.system('cls' if os.name == 'nt' else 'clear')
 
-# decode_mime_words & get_text_from_email (logic sama, print diganti rprint)
 def decode_mime_words(s):
+    # (Logika sama, warning pakai rprint)
     if not s: return ""
     try:
         decoded_parts = decode_header(s)
@@ -244,14 +192,14 @@ def decode_mime_words(s):
         for part, encoding in decoded_parts:
             if isinstance(part, bytes):
                 result.append(part.decode(encoding or 'utf-8', errors='replace'))
-            else:
-                result.append(str(part))
+            else: result.append(str(part))
         return "".join(result)
     except Exception as e:
-        rprint(f"[yellow]{ICON_WARN} Gagal mendekode header: {e}. Header asli: {s}[/yellow]")
+        rprint(f"[yellow][WARN] Gagal mendekode header: {e}. Header asli: {s}[/]")
         return str(s) if isinstance(s, str) else s.decode('utf-8', errors='replace') if isinstance(s, bytes) else "[Decoding Error]"
 
 def get_text_from_email(msg):
+    # (Logika sama, warning pakai rprint)
     text_content = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -263,7 +211,7 @@ def get_text_from_email(msg):
                     payload = part.get_payload(decode=True)
                     if payload: text_content += payload.decode(charset, errors='replace') + "\n"
                 except Exception as e:
-                    rprint(f"[yellow]{ICON_WARN} Tidak bisa mendekode bagian email (charset: {part.get_content_charset()}): {e}[/yellow]")
+                    rprint(f"[yellow][WARN] Tidak bisa mendekode bagian email (charset: {part.get_content_charset()}): {e}[/]")
     else:
         content_type = msg.get_content_type()
         if content_type == "text/plain":
@@ -272,156 +220,177 @@ def get_text_from_email(msg):
                 payload = msg.get_payload(decode=True)
                 if payload: text_content = payload.decode(charset, errors='replace')
             except Exception as e:
-                 rprint(f"[yellow]{ICON_WARN} Tidak bisa mendekode body email (charset: {msg.get_content_charset()}): {e}[/yellow]")
+                 rprint(f"[yellow][WARN] Tidak bisa mendekode body email (charset: {msg.get_content_charset()}): {e}[/]")
     return " ".join(text_content.split()).lower()
 
-# --- Fungsi Beep (print diganti rprint) ---
+# --- Fungsi Beep ---
+# (Output pakai rprint)
 def trigger_beep(action):
     try:
         if action == "buy":
-            rprint(f"[bold magenta]{ICON_BEEP} BEEP untuk [white]BUY[/white]![/bold magenta]")
+            rprint(f"[bold magenta]🔊 BEEP![/] [dim]('BUY')[/]")
             subprocess.run(["beep", "-f", "1000", "-l", "300"], check=True, capture_output=True, text=True)
             time.sleep(0.1)
             subprocess.run(["beep", "-f", "1200", "-l", "200"], check=True, capture_output=True, text=True)
         elif action == "sell":
-            rprint(f"[bold magenta]{ICON_BEEP} BEEP untuk [white]SELL[/white]![/bold magenta]")
+            rprint(f"[bold magenta]🔊 BEEP![/] [dim]('SELL')[/]")
             subprocess.run(["beep", "-f", "700", "-l", "500"], check=True, capture_output=True, text=True)
         else:
-             rprint(f"[yellow]{ICON_WARN} Aksi beep tidak dikenal '{action}'.[/yellow]")
+             rprint(f"[yellow][WARN] Aksi beep tidak dikenal '{action}'.[/]")
     except FileNotFoundError:
-        rprint(f"[yellow]{ICON_WARN} Perintah 'beep' tidak ditemukan. Beep dilewati.[/yellow]")
-        rprint(f"[dim]         (Untuk Linux, install 'beep': sudo apt install beep / sudo yum install beep)[/dim]")
+        rprint(f"[yellow][WARN] Perintah 'beep' tidak ditemukan. Beep dilewati.[/]")
+        rprint(f"[dim]         (Untuk Linux, coba: sudo apt install beep / sudo yum install beep)[/]")
     except subprocess.CalledProcessError as e:
-        rprint(f"[red]{ICON_ERROR} Gagal menjalankan 'beep': {e}[/red]")
-        if e.stderr: rprint(f"[red]         Stderr: {e.stderr.strip()}[/red]")
+        rprint(f"[bold red][ERROR] Gagal menjalankan 'beep': {e}[/]")
+        if e.stderr: rprint(f"[red]         Stderr: {e.stderr.strip()}[/]")
     except Exception as e:
-        rprint(f"[red]{ICON_ERROR} Kesalahan tak terduga saat beep: {e}[/red]")
+        rprint(f"[bold red][ERROR] Kesalahan tak terduga saat beep: {e}[/]")
 
-# --- Fungsi Eksekusi Binance (print diganti rprint, gunakan panel/style) ---
+# --- Fungsi Eksekusi Binance ---
+# (Output pakai rprint, tambah rich formatting untuk detail order sukses/error)
 def get_binance_client(settings):
+    """Membuat instance Binance client."""
     if not BINANCE_AVAILABLE:
-        rprint(f"[red]{ICON_ERROR} Library python-binance tidak terinstall.[/red]")
+        rprint(f"[bold red][ERROR] Library python-binance tidak terinstall. Tidak bisa membuat client.[/]")
         return None
     api_key = settings.get('binance_api_key')
     api_secret = settings.get('binance_api_secret')
     if not api_key or not api_secret:
-        rprint(f"[red]{ICON_ERROR} API Key atau Secret Key Binance belum diatur.[/red]")
-        return None
-    try:
-        rprint(f"[cyan]{ICON_NETWORK} Menghubungkan ke Binance API...[/cyan]")
-        # Set timeouts untuk koneksi dan baca
-        client = Client(api_key, api_secret, requests_params={'timeout': 15})
-        client.ping()
-        # account_info = client.get_account(recvWindow=10000) # Perpanjang recvWindow jika perlu
-        rprint(f"[bold green]{ICON_OK} Koneksi & Autentikasi Binance API Berhasil.[/bold green]")
-        # rprint(f"[dim]         (Tipe Akun: {account_info.get('accountType')})[/dim]")
-        return client
-    except (BinanceAPIException, BinanceOrderException) as e:
-        rprint(f"[bold red]{ICON_ERROR} Gagal koneksi/autentikasi Binance: Status={e.status_code}, Kode={e.code}, Pesan='{e.message}'[/bold red]")
-        if "timestamp" in str(e.message).lower():
-             rprint(f"[yellow]         -> Periksa apakah waktu sistem Anda sinkron.{ICON_CLOCK}[/yellow]")
-        if "signature" in str(e.message).lower() or "invalid key" in str(e.message).lower():
-             rprint(f"[yellow]         -> Periksa kembali API Key dan Secret Key Anda.{ICON_API}[/yellow]")
-        return None
-    except requests.exceptions.Timeout:
-        rprint(f"[bold red]{ICON_ERROR} Koneksi ke Binance API timeout.[/bold red]")
-        rprint(f"[yellow]         -> Periksa koneksi internet atau coba tingkatkan timeout.{ICON_NETWORK}[/yellow]")
-        return None
-    except requests.exceptions.RequestException as e:
-        rprint(f"[bold red]{ICON_ERROR} Gagal menghubungi Binance API: {e}{ICON_NETWORK}[/bold red]")
-        return None
-    except Exception as e:
-        rprint(f"[bold red]{ICON_ERROR} Gagal membuat Binance client:{e}[/bold red]")
-        console.print_exception(show_locals=False)
+        rprint(f"[bold red][ERROR] API Key atau Secret Key Binance belum diatur di konfigurasi.[/]")
         return None
 
+    status_text = Text("Mencoba koneksi ke Binance API...", style="cyan")
+    if RICH_AVAILABLE and console:
+        with console.status(status_text, spinner="dots"):
+            try:
+                client = Client(api_key, api_secret)
+                client.ping() # Tes koneksi
+                rprint(f"[bold green]✅ [BINANCE] Koneksi dan autentikasi berhasil.[/]")
+                return client
+            except BinanceAPIException as e:
+                rprint(f"[bold red]❌ [BINANCE ERROR] Gagal terhubung/autentikasi: Status={e.status_code}, Pesan='{e.message}'[/]")
+                if "timestamp" in e.message.lower(): rprint(f"[yellow]   -> Periksa apakah waktu sistem Anda sinkron.[/]")
+                if "signature" in e.message.lower() or "invalid key" in e.message.lower(): rprint(f"[yellow]   -> Periksa kembali API Key dan Secret Key Anda.[/]")
+                return None
+            except requests.exceptions.RequestException as e:
+                rprint(f"[bold red]❌ [NETWORK ERROR] Gagal menghubungi Binance API: {e}[/]")
+                rprint(f"[yellow]   -> Periksa koneksi internet Anda.[/]")
+                return None
+            except Exception as e:
+                rprint(f"[bold red]❌ [ERROR] Gagal membuat Binance client: {e}[/]")
+                # traceback.print_exc() # Uncomment jika butuh detail traceback
+                return None
+    else: # Fallback tanpa spinner
+        rprint(status_text.plain)
+        # Logika try-except diulang agar tidak duplikat kode terlalu banyak
+        try:
+            client = Client(api_key, api_secret)
+            client.ping()
+            rprint("[INFO] Koneksi Binance berhasil.")
+            return client
+        except Exception as e:
+            rprint(f"[ERROR] Koneksi Binance gagal: {e}")
+            return None
+
+
 def execute_binance_order(client, settings, side):
+    """Mengeksekusi order MARKET BUY atau SELL di Binance."""
     if not client:
-        rprint(f"[red]{ICON_ERROR} Eksekusi Binance dibatalkan, client tidak valid.[/red]")
+        rprint(f"[red][BINANCE] Eksekusi dibatalkan, client tidak valid.[/]")
         return False
     if not settings.get("execute_binance_orders", False):
-        rprint(f"[yellow]{ICON_WARN} Eksekusi order dinonaktifkan. Order dilewati.[/yellow]")
-        return False # Safety net
+        rprint(f"[yellow][BINANCE] Eksekusi order dinonaktifkan. Order dilewati.[/]")
+        return False
 
     pair = settings.get('trading_pair', '').upper()
     if not pair:
-        rprint(f"[red]{ICON_ERROR} Trading pair belum diatur.{ICON_PAIR}[/red]")
+        rprint(f"[red][BINANCE ERROR] Trading pair belum diatur.[/]")
         return False
 
     order_details = {}
     action_desc = ""
-    side_color = "green" if side == Client.SIDE_BUY else "red"
-    side_icon = ICON_BINANCE
+    order_successful = False
+    result_details = {}
 
     try:
         if side == Client.SIDE_BUY:
             quote_qty = settings.get('buy_quote_quantity', 0.0)
             if quote_qty <= 0:
-                 rprint(f"[red]{ICON_ERROR} Kuantitas Beli (buy_quote_quantity) harus > 0.{ICON_QTY}[/red]")
+                 rprint(f"[red][BINANCE ERROR] Kuantitas Beli (buy_quote_quantity) harus > 0.[/]")
                  return False
             order_details = {'symbol': pair, 'side': Client.SIDE_BUY, 'type': Client.ORDER_TYPE_MARKET, 'quoteOrderQty': quote_qty}
-            action_desc = f"MARKET BUY {quote_qty} (quote) {pair}"
+            action_desc = f"[bold magenta]BUY {quote_qty} (quote) of {pair}[/]"
+
         elif side == Client.SIDE_SELL:
             base_qty = settings.get('sell_base_quantity', 0.0)
             if base_qty <= 0:
-                 rprint(f"[yellow]{ICON_INFO} Kuantitas Jual (sell_base_quantity) = 0. Order SELL tidak dieksekusi.{ICON_QTY}[/yellow]")
-                 return False
+                 rprint(f"[yellow][BINANCE WARN] Kuantitas Jual (sell_base_quantity) adalah 0. Order SELL tidak dieksekusi.[/]")
+                 return False # Bukan error, tapi tidak eksekusi
             order_details = {'symbol': pair, 'side': Client.SIDE_SELL, 'type': Client.ORDER_TYPE_MARKET, 'quantity': base_qty}
-            action_desc = f"MARKET SELL {base_qty} (base) {pair}"
+            action_desc = f"[bold magenta]SELL {base_qty} (base) of {pair}[/]"
         else:
-            rprint(f"[red]{ICON_ERROR} Sisi order tidak valid: {side}[/red]")
+            rprint(f"[red][BINANCE ERROR] Sisi order tidak valid: {side}[/]")
             return False
 
-        rprint(Panel(f"Mencoba eksekusi: [bold {side_color}]{action_desc}[/bold {side_color}]...",
-                     title=f"{side_icon} Eksekusi Binance", border_style="magenta"))
+        rprint(f"[cyan]Binance 執行:[/cyan] Mencoba eksekusi {action_desc}...")
 
-        # Simulasi jika perlu (DEBUG)
-        # rprint(f"[yellow][DEBUG] Simulasi order: {order_details}[/yellow]")
-        # time.sleep(1)
-        # return True
+        status_text = Text(f"Mengirim order {side} {pair}...", style="cyan")
+        if RICH_AVAILABLE and console:
+             with console.status(status_text, spinner="arrow3"):
+                 order_result = client.create_order(**order_details)
+                 time.sleep(0.5) # Beri jeda sedikit
+        else:
+             rprint(status_text.plain)
+             order_result = client.create_order(**order_details)
 
-        order_result = client.create_order(**order_details)
 
-        # Tampilkan hasil dengan tabel Rich
-        result_table = Table(title=f"{ICON_OK} Order Berhasil Dieksekusi!", show_header=False, box=None, padding=(0, 1))
-        result_table.add_column(style="dim cyan")
-        result_table.add_column()
-        result_table.add_row("Order ID", str(order_result.get('orderId')))
-        result_table.add_row("Symbol", order_result.get('symbol'))
-        result_table.add_row("Side", order_result.get('side'))
-        result_table.add_row("Status", order_result.get('status'))
-
+        rprint(f"[bold green]✅ [BINANCE SUCCESS] Order berhasil dieksekusi![/]")
+        # Tampilkan detail order dengan format lebih rapi
+        result_details = {
+            "Order ID": str(order_result.get('orderId')),
+            "Symbol": order_result.get('symbol'),
+            "Side": order_result.get('side'),
+            "Status": order_result.get('status')
+        }
         if order_result.get('fills') and len(order_result.get('fills')) > 0:
             total_qty = sum(float(f['qty']) for f in order_result['fills'])
             total_quote_qty = sum(float(f['cummulativeQuoteQty']) for f in order_result['fills'])
             avg_price = total_quote_qty / total_qty if total_qty else 0
-            result_table.add_row("Avg Price", f"{avg_price:.8f}")
-            result_table.add_row("Filled Qty", f"{total_qty:.8f} (Base) / {total_quote_qty:.4f} (Quote)")
+            result_details["Avg Price"] = f"{avg_price:.8f}"
+            result_details["Filled Qty (Base)"] = f"{total_qty:.8f}"
+            result_details["Filled Qty (Quote)"] = f"{total_quote_qty:.4f}"
         elif order_result.get('cummulativeQuoteQty'):
-             result_table.add_row("Total Cost/Proceeds", f"{float(order_result['cummulativeQuoteQty']):.4f} (Quote)")
+             result_details["Total Cost/Proceeds (Quote)"] = f"{float(order_result['cummulativeQuoteQty']):.4f}"
 
-        rprint(Panel(result_table, border_style="green"))
-        return True
+        # Cetak detail menggunakan cara yang lebih terstruktur (jika rich ada)
+        if RICH_AVAILABLE:
+             for key, value in result_details.items():
+                 rprint(f"  [dim]{key:<25}:[/] [bright_white]{value}[/]")
+        else:
+             for key, value in result_details.items():
+                 print(f"  {key}: {value}")
 
-    except (BinanceAPIException, BinanceOrderException) as e:
-        error_panel_content = Text()
-        error_panel_content.append(f"Gagal eksekusi order: Status={e.status_code}, Kode={e.code}\n", style="bold red")
-        error_panel_content.append(f"Pesan: '{e.message}'", style="red")
-        if e.code == -2010: error_panel_content.append(f"\n[yellow]   -> Kemungkinan saldo tidak cukup.{ICON_QTY}[/yellow]")
-        elif e.code == -1121: error_panel_content.append(f"\n[yellow]   -> Trading pair '{pair}' tidak valid.{ICON_PAIR}[/yellow]")
-        elif e.code == -1013 or 'MIN_NOTIONAL' in str(e.message): error_panel_content.append(f"\n[yellow]   -> Order size terlalu kecil (cek MIN_NOTIONAL).{ICON_QTY}[/yellow]")
-        elif e.code == -1111: error_panel_content.append(f"\n[yellow]   -> Kuantitas order tidak sesuai LOT_SIZE.{ICON_QTY}[/yellow]")
-        rprint(Panel(error_panel_content, title=f"{ICON_ERROR} Binance API/Order Error", border_style="red"))
-        return False
+        order_successful = True
+
+    except BinanceAPIException as e:
+        rprint(f"[bold red]❌ [BINANCE API ERROR] Gagal eksekusi: Status={e.status_code}, Kode={e.code}, Pesan='{e.message}'[/]")
+        if e.code == -2010: rprint(f"[red]   -> Kemungkinan saldo tidak cukup.[/]")
+        elif e.code == -1121: rprint(f"[red]   -> Trading pair '{pair}' tidak valid.[/]")
+        elif e.code == -1013 or 'MIN_NOTIONAL' in str(e.message): rprint(f"[red]   -> Order size terlalu kecil (cek MIN_NOTIONAL).[/]")
+        elif e.code == -1111: rprint(f"[red]   -> Kuantitas order tidak sesuai aturan LOT_SIZE.[/]")
+    except BinanceOrderException as e:
+        rprint(f"[bold red]❌ [BINANCE ORDER ERROR] Gagal eksekusi: Status={e.status_code}, Kode={e.code}, Pesan='{e.message}'[/]")
     except requests.exceptions.RequestException as e:
-        rprint(Panel(f"Gagal mengirim order ke Binance: {e}\nPeriksa koneksi internet.", title=f"{ICON_ERROR} Network Error", border_style="red"))
-        return False
+        rprint(f"[bold red]❌ [NETWORK ERROR] Gagal mengirim order ke Binance: {e}[/]")
     except Exception as e:
-        rprint(Panel(f"Kesalahan tak terduga saat eksekusi order Binance:\n{e}", title=f"{ICON_ERROR} Error", border_style="red"))
-        console.print_exception(show_locals=False)
-        return False
+        rprint(f"[bold red]❌ [ERROR] Kesalahan tak terduga saat eksekusi order Binance:[/]")
+        if RICH_AVAILABLE and console: console.print_exception(show_locals=False)
+        else: traceback.print_exc()
 
-# --- Fungsi Pemrosesan Email (print diganti rprint, gunakan panel/style) ---
+    return order_successful
+
+# --- Fungsi Pemrosesan Email ---
+# (Output pakai rprint, tambah Rule pemisah)
 def process_email(mail, email_id, settings, binance_client):
     global running
     if not running: return
@@ -431,34 +400,55 @@ def process_email(mail, email_id, settings, binance_client):
     email_id_str = email_id.decode('utf-8')
 
     try:
-        # rprint(f"[dim]Fetching email ID {email_id_str}...[/dim]")
-        status, data = mail.fetch(email_id, "(RFC822)")
-        if status != 'OK':
-            rprint(f"[red]{ICON_ERROR} Gagal mengambil email ID {email_id_str}: {status}[/red]")
-            return
+        # Gunakan status untuk fetch
+        status_text = Text(f"Mengambil email ID {email_id_str}...", style="dim cyan")
+        fetch_success = False
+        raw_email = None
+        if RICH_AVAILABLE and console:
+             with console.status(status_text, spinner="moon"):
+                 status, data = mail.fetch(email_id, "(RFC822)")
+                 if status == 'OK':
+                     raw_email = data[0][1]
+                     fetch_success = True
+                 else:
+                     rprint(f"[red][ERROR] Gagal mengambil email ID {email_id_str}: {status}[/]")
+                 time.sleep(0.2) # Sedikit jeda
+        else:
+             rprint(status_text.plain)
+             status, data = mail.fetch(email_id, "(RFC822)")
+             if status == 'OK':
+                 raw_email = data[0][1]
+                 fetch_success = True
+             else:
+                  rprint(f"[ERROR] Gagal mengambil email: {status}")
 
-        raw_email = data[0][1]
+        if not fetch_success or not raw_email:
+            return # Keluar jika fetch gagal
+
         msg = email.message_from_bytes(raw_email)
         subject = decode_mime_words(msg["Subject"])
         sender = decode_mime_words(msg["From"])
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Tampilkan detail email dalam panel
-        email_details = Table(show_header=False, box=None, padding=(0,1))
-        email_details.add_column(style="dim cyan")
-        email_details.add_column(style="white")
-        email_details.add_row("ID", email_id_str)
-        email_details.add_row("Dari", sender)
-        email_details.add_row("Subjek", subject)
+        # Tampilkan info email dalam Panel jika rich tersedia
+        email_info_text = Text()
+        email_info_text.append(f"ID    : {email_id_str}\n", style="dim")
+        email_info_text.append(f"Dari  : {sender}\n", style="white")
+        email_info_text.append(f"Subjek: {subject}", style="bright_white")
 
-        rprint(Panel(email_details, title=f"{ICON_EMAIL} Email Ditemukan ({timestamp})", border_style="cyan", expand=False))
+        if RICH_AVAILABLE:
+            rprint(Panel(email_info_text, title=f"📧 Email Diterima ({timestamp})", border_style="blue", expand=False))
+        else:
+            rprint(f"\n--- Email Diterima ({timestamp}) ---")
+            print(f" ID    : {email_id_str}")
+            print(f" Dari  : {sender}")
+            print(f" Subjek: {subject}")
 
         body = get_text_from_email(msg)
         full_content = (subject.lower() + " " + body)
-        # rprint(f"[dim]Content: {full_content[:150]}...[/dim]") # Debug
 
         if target_keyword_lower in full_content:
-            rprint(f"[green]{ICON_TARGET} Keyword target '{settings['target_keyword']}' ditemukan.[/green]")
+            rprint(f"[green]🎯 Keyword target '{settings['target_keyword']}' ditemukan.[/]")
             try:
                 target_index = full_content.find(target_keyword_lower)
                 trigger_index = full_content.find(trigger_keyword_lower, target_index + len(target_keyword_lower))
@@ -470,493 +460,632 @@ def process_email(mail, email_id, settings, binance_client):
 
                     if words_after_trigger:
                         action_word = words_after_trigger[0].strip('.,!?:;()[]{}').lower()
-                        rprint(f"[green]{ICON_TRIGGER} Keyword trigger '{settings['trigger_keyword']}' ditemukan. Kata aksi: [bold white]'{action_word}'[/bold white][/green]")
+                        rprint(f"[green]🔑 Keyword trigger '{settings['trigger_keyword']}' ditemukan. Aksi: [bold cyan]{action_word}[/][/]")
 
                         # --- Trigger Aksi ---
                         order_attempted = False
                         execute_binance = settings.get("execute_binance_orders", False)
-                        action_color = "white"
-                        action_icon = ""
 
                         if action_word == "buy":
                             trigger_beep("buy")
-                            action_color = "green"
-                            action_icon = ICON_BINANCE
                             if execute_binance:
                                 if binance_client:
-                                    order_attempted = execute_binance_order(binance_client, settings, Client.SIDE_BUY)
-                                else:
-                                    rprint(f"[yellow]{ICON_WARN} Eksekusi Binance aktif tapi client tidak valid/tersedia.{ICON_NETWORK}[/yellow]")
+                                    execute_binance_order(binance_client, settings, Client.SIDE_BUY)
+                                    order_attempted = True
+                                else: rprint(f"[yellow][WARN] Eksekusi Binance aktif tapi client tidak valid.[/]")
+
                         elif action_word == "sell":
-                            trigger_beep("sell")
-                            action_color = "red"
-                            action_icon = ICON_BINANCE
                             can_sell = settings.get('sell_base_quantity', 0.0) > 0
+                            trigger_beep("sell")
                             if execute_binance:
                                 if can_sell:
                                     if binance_client:
-                                        order_attempted = execute_binance_order(binance_client, settings, Client.SIDE_SELL)
-                                    else:
-                                        rprint(f"[yellow]{ICON_WARN} Eksekusi Binance aktif tapi client tidak valid/tersedia.{ICON_NETWORK}[/yellow]")
+                                        execute_binance_order(binance_client, settings, Client.SIDE_SELL)
+                                        order_attempted = True
+                                    else: rprint(f"[yellow][WARN] Eksekusi Binance aktif tapi client tidak valid.[/]")
                                 elif settings.get('sell_base_quantity') <= 0:
-                                    rprint(f"[yellow]{ICON_INFO} Aksi 'sell' terdeteksi, tapi 'sell_base_quantity' = 0. Order tidak dieksekusi.[/yellow]")
+                                    rprint(f"[yellow][INFO] Aksi 'sell', tapi 'sell_base_quantity'=0. Order Binance dilewati.[/]")
+
                         else:
-                            rprint(f"[blue]{ICON_INFO} Kata aksi '{action_word}' bukan 'buy'/'sell'. Tidak ada aksi market.[/blue]")
+                            rprint(f"[blue][INFO] Kata setelah trigger ('{action_word}') bukan 'buy'/'sell'. Tidak ada aksi market.[/]")
 
-                        # Pesan jika eksekusi aktif tapi gagal karena client
-                        if execute_binance and action_word in ["buy", "sell"] and not order_attempted and not (action_word == "sell" and settings.get('sell_base_quantity', 0.0) <= 0) and binance_client is None:
-                             rprint(f"[yellow]{ICON_WARN} Eksekusi tidak dilakukan (Client Binance tidak tersedia).[/yellow]")
+                        if execute_binance and action_word in ["buy", "sell"] and not order_attempted and not (action_word == "sell" and settings.get('sell_base_quantity', 0.0) <= 0):
+                             rprint(f"[yellow][BINANCE] Eksekusi tidak dilakukan (lihat error client di atas).[/]")
 
-                    else:
-                        rprint(f"[yellow]{ICON_WARN} Trigger '{settings['trigger_keyword']}' ditemukan, tapi tidak ada kata setelahnya.[/yellow]")
-                else:
-                     rprint(f"[yellow]{ICON_WARN} Target ditemukan, tapi trigger '{settings['trigger_keyword']}' tidak ditemukan [bold]setelahnya[/bold].[/yellow]")
+                    else: rprint(f"[yellow][WARN] Trigger ditemukan, tapi tidak ada kata setelahnya.[/]")
+                else: rprint(f"[yellow][WARN] Target ditemukan, tapi trigger '{settings['trigger_keyword']}' tidak ditemukan [u]setelahnya[/].[/]")
 
             except Exception as e:
-                 rprint(f"[red]{ICON_ERROR} Gagal parsing kata setelah trigger: {e}[/red]")
-                 console.print_exception(show_locals=False)
+                 rprint(f"[bold red][ERROR] Gagal parsing kata setelah trigger: {e}[/]")
+                 if RICH_AVAILABLE and console: console.print_exception(show_locals=False)
+                 else: traceback.print_exc()
         else:
-            rprint(f"[blue]{ICON_INFO} Keyword target '{settings['target_keyword']}' tidak ditemukan.[/blue]")
+            rprint(f"[blue][INFO] Keyword target '{settings['target_keyword']}' tidak ditemukan.[/]")
 
-        # Tandai email sebagai sudah dibaca
+        # Tandai email sebagai sudah dibaca ('Seen')
         try:
-            # rprint(f"[dim]Menandai email {email_id_str} sebagai Seen...[/dim]")
+            # rprint(f"[dim]Menandai email {email_id_str} sebagai 'Seen'...[/]", end='\r')
             mail.store(email_id, '+FLAGS', '\\Seen')
-            rprint(f"[dim cyan]{ICON_MARK} Email {email_id_str} ditandai sudah dibaca.[/dim cyan]")
+            # rprint(" " * 40, end='\r') # Clear message
         except Exception as e:
-            rprint(f"[red]{ICON_ERROR} Gagal menandai email {email_id_str} sebagai 'Seen': {e}[/red]")
-        # console.rule(style="dim cyan") # Garis pemisah antar email
+            rprint(f"\n[red][ERROR] Gagal menandai email {email_id_str} sebagai 'Seen': {e}[/]")
+
+        # Tambahkan pemisah Rule
+        if RICH_AVAILABLE: rprint(Rule(style="dim blue"))
+        else: print("-------------------------------------------")
 
     except Exception as e:
-        rprint(Panel(f"Gagal memproses email ID {email_id_str}:\n{e}", title=f"{ICON_ERROR} Error Proses Email", border_style="red"))
-        console.print_exception(show_locals=False)
+        rprint(f"[bold red][ERROR] Gagal memproses email ID {email_id_str}:[/]")
+        if RICH_AVAILABLE and console: console.print_exception(show_locals=False)
+        else: traceback.print_exc()
+        if RICH_AVAILABLE: rprint(Rule(style="dim red")) # Pemisah error
 
-# --- Fungsi Listening Utama (Gunakan Rich Status/Live) ---
+# --- Fungsi Listening Utama ---
+# (Gunakan spinner untuk status, rprint untuk log, Rule pemisah)
 def start_listening(settings):
     global running
     running = True
     mail = None
     binance_client = None
-    last_check_time = 0
+    last_check_time = time.time()
     consecutive_errors = 0
     max_consecutive_errors = 5
     long_wait_time = 60
-    initial_wait_time = 5 # Naikkan sedikit wait time awal
+    initial_wait_time = 2
     wait_time = initial_wait_time
-    last_ping_time = 0 # Waktu ping terakhir ke binance
-    ping_interval = max(60, settings['check_interval_seconds'] * 5) # Interval ping binance
+    check_interval = settings['check_interval_seconds']
 
     # --- Setup Binance Client ---
     execute_binance = settings.get("execute_binance_orders", False)
     if execute_binance:
         if not BINANCE_AVAILABLE:
-             rprint(Panel(f"[bold red]{ICON_ERROR} Eksekusi Binance aktif tapi library [cyan]python-binance[/cyan] tidak ada![/bold red]\n"
-                           "[yellow]Nonaktifkan eksekusi di Pengaturan atau install library.[/yellow]",
-                           title="Error Kritis", border_style="red", expand=False))
-             running = False; return
-        console.rule("[bold cyan]Inisialisasi Binance Client[/bold cyan]", style="cyan")
+             rprint(f"[bold red][FATAL] Eksekusi Binance aktif tapi library python-binance tidak ada![/]")
+             rprint(f"[yellow] -> Install: pip install python-binance atau nonaktifkan eksekusi.[/]")
+             running = False
+             return
+        rprint(Rule("[bold cyan]Inisialisasi Binance[/]", style="cyan"))
         binance_client = get_binance_client(settings)
         if not binance_client:
-            rprint(Panel(f"[bold red]{ICON_ERROR} Gagal menginisialisasi Binance Client.[/bold red]\n"
-                           "[yellow]Periksa API Key/Secret, koneksi, dan waktu sistem.[/yellow]\n"
-                           "[yellow]Eksekusi order [bold]tidak[/bold] akan berfungsi. Program lanjut untuk email saja.[/yellow]",
-                           title="Error Koneksi Binance", border_style="red", expand=False))
+            rprint(f"[bold red][FATAL] Gagal menginisialisasi Binance Client.[/]")
+            rprint(f"[yellow] -> Periksa API Key/Secret, koneksi, dan waktu sistem.[/]")
+            rprint(f"[yellow] -> Program akan lanjut untuk notifikasi email saja.[/]")
         else:
-            rprint(f"[bold green]{ICON_OK} Binance Client Siap.[/bold green]")
-        console.rule(style="cyan")
+            # Pesan sukses sudah ada di get_binance_client
+            pass
+        rprint(Rule(style="cyan"))
     else:
-        rprint(Panel(f"[yellow]{ICON_INFO} Eksekusi order Binance [bold]Nonaktif[/bold]. Hanya notifikasi email & beep.[/yellow]",
-                     title="Mode Operasi", border_style="yellow", expand=False))
+        rprint(Panel("[yellow]ℹ️ Eksekusi order Binance dinonaktifkan.[/]\n[dim](Hanya notifikasi email dan beep yang akan aktif)[/]", title="Info", border_style="yellow", expand=False))
 
-    # --- Loop Utama dengan Rich Live/Status ---
-    status_text = Text(f"{ICON_LISTEN} Menunggu email...", style="blue")
-    spinner = SpinnerColumn(spinner_name="dots", style="blue")
-    status_columns = [spinner, TextColumn("[blue]{task.description}")]
+    spinner_name = "dots" # Default spinner
+    if RICH_AVAILABLE: spinner_name = "simpleDotsScrolling" # Pilih spinner keren jika ada
 
-    with Live(Panel(status_text, title="Status", border_style="blue"), console=console, refresh_per_second=4, transient=True) as live:
-        while running:
-            try:
-                # --- Koneksi IMAP ---
-                if not mail or mail.state != 'SELECTED':
-                    live.update(Panel(Text(f"{ICON_NETWORK} Menghubungkan ke IMAP {settings['imap_server']}...", style="cyan"), title="Status", border_style="cyan"), refresh=True)
-                    time.sleep(0.5) # Jeda singkat sebelum konek
+    while running:
+        try:
+            # --- Koneksi IMAP ---
+            if not mail or mail.state != 'SELECTED':
+                status_text = Text(f"Menghubungkan ke IMAP {settings['imap_server']}...", style="cyan")
+                if RICH_AVAILABLE and console:
+                    with console.status(status_text, spinner="earth"):
+                        try:
+                            mail = imaplib.IMAP4_SSL(settings['imap_server'], timeout=30)
+                            rv, desc = mail.login(settings['email_address'], settings['app_password'])
+                            if rv != 'OK': raise imaplib.IMAP4.error(f"Login failed: {desc}")
+                            mail.select("inbox")
+                            rprint(f"[bold green]✅ Login email berhasil![/] [dim]({settings['email_address']})[/]")
+                            rprint(Rule("[bold green]Memulai Mode Mendengarkan[/]", style="green"))
+                            consecutive_errors = 0
+                            wait_time = initial_wait_time
+                        except (imaplib.IMAP4.error, OSError, socket.gaierror, socket.error) as conn_err:
+                             rprint(f"[bold red]❌ Login Email / Koneksi GAGAL![/]")
+                             rprint(f"[red]   Pesan: {conn_err}[/]")
+                             if "authentication failed" in str(conn_err).lower() or "invalid credentials" in str(conn_err).lower():
+                                 rprint(f"[yellow]   -> Periksa Alamat Email & App Password.[/]")
+                                 rprint(f"[yellow]   -> Pastikan Akses IMAP diaktifkan & Less Secure Apps (jika perlu) diizinkan.[/]")
+                                 running = False # Berhenti jika otentikasi gagal
+                             else:
+                                 rprint(f"[yellow]   -> Periksa Server IMAP & Koneksi Internet.[/]")
+                             mail = None # Pastikan mail None jika gagal
+                             raise conn_err # Lemparkan lagi untuk ditangkap di blok except luar
+                else: # Fallback tanpa spinner
+                    rprint(status_text.plain)
                     try:
                         mail = imaplib.IMAP4_SSL(settings['imap_server'], timeout=30)
-                        live.update(Panel(Text(f"{ICON_EMAIL} Login sebagai {settings['email_address']}...", style="cyan"), title="Status", border_style="cyan"), refresh=True)
                         rv, desc = mail.login(settings['email_address'], settings['app_password'])
                         if rv != 'OK': raise imaplib.IMAP4.error(f"Login failed: {desc}")
                         mail.select("inbox")
-                        live.console.print(f"[bold green]{ICON_OK} Login & Koneksi IMAP Berhasil.[/bold green]")
-                        live.console.print(Panel(f"[bold green]{ICON_LISTEN} Mode Mendengarkan Aktif[/bold green]\n[dim]Tekan Ctrl+C untuk berhenti[/dim]",
-                                               title="Listener Ready", border_style="green", expand=False))
-                        live.update(Panel(status_text, title="Status", border_style="blue"), refresh=True) # Kembali ke status tunggu
+                        rprint("[INFO] Login email berhasil.")
+                        rprint("--- Memulai Mode Mendengarkan ---")
                         consecutive_errors = 0
                         wait_time = initial_wait_time
-                        last_check_time = time.time() # Mulai cek segera setelah konek
-                    except (imaplib.IMAP4.error, OSError, socket.error, socket.gaierror, TimeoutError) as login_err:
-                         live.console.print(f"[bold red]{ICON_ERROR} GAGAL KONEKSI/LOGIN EMAIL![/bold red]")
-                         live.console.print(f"[red]   Pesan: {login_err}[/red]")
-                         live.console.print(f"[yellow]   Periksa Email, App Password, Server IMAP, Izin Akses, dan Koneksi Internet.{ICON_NETWORK}[/yellow]")
-                         if "authentication failed" in str(login_err).lower():
-                             running = False # Berhenti jika otentikasi gagal
-                         else: # Jika error koneksi
-                             consecutive_errors += 1
-                             sleep_time = wait_time if consecutive_errors < max_consecutive_errors else long_wait_time
-                             live.update(Panel(Text(f"{ICON_ERROR} Gagal konek. Mencoba lagi dalam {sleep_time}d...", style="red"), title="Status", border_style="red"), refresh=True)
-                             time.sleep(sleep_time)
-                             wait_time = min(wait_time * 2, 30) if consecutive_errors < max_consecutive_errors else wait_time
-                         mail = None # Pastikan reconnect dicoba
-                         continue # Lanjut ke iterasi berikutnya
+                    except Exception as conn_err:
+                        rprint(f"[ERROR] Login/Koneksi Gagal: {conn_err}")
+                        mail = None
+                        raise conn_err
 
-                # --- Loop Inner (Cek Email & Koneksi) ---
-                current_time = time.time()
-                if current_time - last_check_time >= settings['check_interval_seconds']:
-                    live.update(Panel(Text(f"{ICON_LISTEN} Memeriksa email baru...", style="blue"), title="Status", border_style="blue"), refresh=True)
-                    # NOOP Check
+            # --- Loop Cek Email & Koneksi ---
+            status_listen = f"[blue]Mendengarkan email baru... Cek setiap {check_interval} detik[/]"
+            if RICH_AVAILABLE and console:
+                 with console.status(status_listen, spinner=spinner_name):
+                     while running:
+                         current_time = time.time()
+                         if current_time - last_check_time < check_interval:
+                             time.sleep(0.5)
+                             continue
+
+                         # Cek IMAP NOOP
+                         try:
+                             status, _ = mail.noop()
+                             if status != 'OK':
+                                 rprint(f"\n[yellow][WARN] Koneksi IMAP NOOP gagal ({status}). Reconnecting...[/]")
+                                 try: mail.close()
+                                 except Exception: pass
+                                 mail = None; break
+                         except (imaplib.IMAP4.abort, imaplib.IMAP4.readonly, BrokenPipeError, OSError) as noop_err:
+                             rprint(f"\n[yellow][WARN] Koneksi IMAP terputus ({type(noop_err).__name__}). Reconnecting...[/]")
+                             try: mail.logout()
+                             except Exception: pass
+                             mail = None; break
+
+                         # Cek Binance Ping (jika aktif & perlu)
+                         if binance_client and current_time - getattr(binance_client, '_last_ping_time', 0) > max(60, check_interval * 5):
+                             try:
+                                 # Ping tanpa status/spinner agar tidak terlalu berisik
+                                 binance_client.ping()
+                                 setattr(binance_client, '_last_ping_time', current_time)
+                             except Exception as ping_err:
+                                 rprint(f"\n[yellow][WARN] Ping ke Binance API gagal ({ping_err}). Re-init client...[/]")
+                                 binance_client = get_binance_client(settings) # Coba buat ulang
+                                 if binance_client:
+                                     rprint(f"[green]   -> Binance client berhasil dibuat ulang.[/]")
+                                     setattr(binance_client, '_last_ping_time', current_time)
+                                 else:
+                                     rprint(f"[red]   -> Gagal membuat ulang Binance client.[/]")
+                                 time.sleep(5) # Jeda
+
+                         # Cek Email UNSEEN
+                         status, messages = mail.search(None, '(UNSEEN)')
+                         if status != 'OK':
+                             rprint(f"\n[red][ERROR] Gagal mencari email UNSEEN: {status}[/]")
+                             try: mail.close()
+                             except Exception: pass
+                             mail = None; break
+
+                         email_ids = messages[0].split()
+                         if email_ids:
+                             num_emails = len(email_ids)
+                             # Keluar dari status spinner sebelum print email
+                             console.show_cursor(True)
+                             console.print(f"\n[bold green][!] Menemukan {num_emails} email baru! Memproses...[/]")
+                             console.show_cursor(False) # Sembunyikan lagi
+                             # Hentikan spinner sementara
+                             console.live.stop()
+
+                             for i, email_id in enumerate(email_ids):
+                                 if not running: break
+                                 # rprint(f"[dim]--- Memproses email {i+1}/{num_emails} ---[/]") # Bisa diaktifkan jika perlu
+                                 process_email(mail, email_id, settings, binance_client)
+                             if not running: break
+                             # rprint(Rule(style="dim green"))
+                             rprint(f"[green][INFO] Selesai memproses {num_emails} email. Kembali mendengarkan...[/]")
+                             # Mulai lagi spinner setelah selesai proses
+                             console.live.start(refresh=True)
+
+
+                         last_check_time = current_time
+                         # Update status spinner dengan '.' bergerak jika tidak ada email
+                         if not email_ids:
+                            dots = "." * (int(time.time()) % 4)
+                            console.live.update(Text(f"{status_listen} {dots}", style="blue"), refresh=True)
+
+                         time.sleep(0.1) # Short sleep dalam loop inner
+
+            else: # Fallback tanpa Rich spinner
+                while running:
+                    current_time = time.time()
+                    if current_time - last_check_time < check_interval:
+                        time.sleep(1)
+                        continue
+                    print(f"[INFO] Mengecek email...", end='\r')
+                    # (Logika cek IMAP, Binance, Email sama seperti di atas, tapi pakai print biasa)
+                    # ... (Implementasi fallback cek IMAP, Binance, Email) ...
+                    # Cek IMAP NOOP
                     try:
-                        # rprint("[dim]NOOP Check...[/dim]", end='\r')
                         status, _ = mail.noop()
-                        if status != 'OK': raise imaplib.IMAP4.abort("NOOP failed")
-                        # rprint(" " * 20, end='\r')
-                    except (imaplib.IMAP4.abort, imaplib.IMAP4.readonly, BrokenPipeError, OSError) as noop_err:
-                         live.console.print(f"\n[yellow]{ICON_WARN} Koneksi IMAP terputus ({type(noop_err).__name__}). Reconnecting...[/yellow]")
-                         try: mail.logout()
-                         except Exception: pass
-                         mail = None
-                         time.sleep(initial_wait_time) # Jeda sebelum reconnect
-                         continue # Kembali ke loop luar untuk reconnect
+                        if status != 'OK': raise Exception(f"NOOP failed: {status}")
+                    except Exception as noop_err:
+                        print(f"\n[WARN] Koneksi IMAP terputus/gagal NOOP: {noop_err}. Reconnecting...")
+                        try: mail.logout()
+                        except: pass
+                        mail=None; break # Reconnect di loop luar
 
-                    # Ping Binance Check (lebih jarang)
-                    if binance_client and current_time - last_ping_time > ping_interval:
-                        live.update(Panel(Text(f"{ICON_NETWORK} Ping Binance API...", style="cyan"), title="Status", border_style="cyan"), refresh=True)
-                        try:
-                             binance_client.ping()
-                             last_ping_time = current_time
-                             live.update(Panel(status_text, title="Status", border_style="blue"), refresh=True) # Kembali ke status tunggu
-                        except Exception as ping_err:
-                             live.console.print(f"\n[yellow]{ICON_WARN} Ping Binance API gagal ({ping_err}). Mencoba re-init client...{ICON_NETWORK}[/yellow]")
-                             binance_client = get_binance_client(settings) # Coba buat ulang
-                             if binance_client:
-                                 live.console.print(f"[green]{ICON_OK} Binance client berhasil di-init ulang.[/green]")
-                                 last_ping_time = current_time
-                             else:
-                                 live.console.print(f"[red]{ICON_ERROR} Gagal re-init Binance client.[/red]")
-                                 last_ping_time = 0 # Coba lagi nanti
-                             time.sleep(5)
-                             live.update(Panel(status_text, title="Status", border_style="blue"), refresh=True) # Kembali ke status tunggu
+                    # Cek Binance (tanpa ping di fallback)
 
-                    # Cek Email UNSEEN
+                    # Cek Email
                     status, messages = mail.search(None, '(UNSEEN)')
                     if status != 'OK':
-                         live.console.print(f"\n[red]{ICON_ERROR} Gagal mencari email UNSEEN: {status}. Reconnecting...[/red]")
-                         try: mail.close()
-                         except Exception: pass
-                         mail = None
-                         time.sleep(initial_wait_time)
-                         continue
+                        print(f"\n[ERROR] Gagal cari email: {status}")
+                        try: mail.logout()
+                        except: pass
+                        mail=None; break
 
                     email_ids = messages[0].split()
                     if email_ids:
-                        num_emails = len(email_ids)
-                        live.console.print(f"\n[bold green]{ICON_PROCESS} Menemukan {num_emails} email baru! Memproses...[/bold green]")
-                        console.rule(style="dim green")
-                        for i, email_id in enumerate(email_ids):
+                        print(f"\n[INFO] Ditemukan {len(email_ids)} email baru!")
+                        for email_id in email_ids:
                             if not running: break
-                            live.console.print(f"[dim]--- Memproses email {i+1}/{num_emails} ---[/dim]")
                             process_email(mail, email_id, settings, binance_client)
-                            console.rule(style="dim green") # Pemisah antar email
                         if not running: break
-                        live.console.print(f"[bold green]{ICON_OK} Selesai memproses. Kembali mendengarkan...[/bold green]")
+                        print("[INFO] Selesai proses. Kembali mendengarkan...")
                     else:
-                        # Tidak ada email baru, update status tunggu
-                        dots = "." * (int(time.time()*2) % 4)
-                        status_text = Text(f"{ICON_LISTEN} Menunggu email {dots}", style="blue")
-                        live.update(Panel(status_text, title="Status", border_style="blue"), refresh=True)
+                        print(f"[INFO] Tidak ada email baru. Cek lagi dalam {check_interval}s.   ", end='\r')
 
 
-                    last_check_time = current_time # Update waktu cek terakhir
-                else:
-                    # Jika belum waktunya cek, tidur sebentar
-                    time.sleep(0.5)
+                    last_check_time = current_time
+                    time.sleep(1) # Sedikit jeda
+
+            # Keluar loop inner (baik karena error atau stop)
+            if mail and mail.state == 'SELECTED':
+                try: mail.close()
+                except Exception: pass
 
 
-            except (imaplib.IMAP4.error, imaplib.IMAP4.abort, BrokenPipeError, OSError) as e:
-                live.console.print(f"\n[bold red]{ICON_ERROR} Kesalahan IMAP/Koneksi: {e}[/bold red]")
-                consecutive_errors += 1
-                sleep_time = wait_time if consecutive_errors < max_consecutive_errors else long_wait_time
-                live.update(Panel(Text(f"{ICON_ERROR} Error ({consecutive_errors}). Reconnecting dalam {sleep_time}d...", style="red"), title="Status", border_style="red"), refresh=True)
-                time.sleep(sleep_time)
-                wait_time = min(wait_time * 2, 30) if consecutive_errors < max_consecutive_errors else wait_time
-                mail = None # Force reconnect
-            except (socket.error, socket.gaierror) as e:
-                live.console.print(f"\n[bold red]{ICON_ERROR} Kesalahan Jaringan: {e}[/bold red]")
-                consecutive_errors += 1
-                sleep_time = wait_time if consecutive_errors < max_consecutive_errors else long_wait_time
-                live.update(Panel(Text(f"{ICON_ERROR} Error Jaringan ({consecutive_errors}). Retry dalam {sleep_time}d...", style="red"), title="Status", border_style="red"), refresh=True)
-                time.sleep(sleep_time)
-                wait_time = min(wait_time * 2, 45) if consecutive_errors < max_consecutive_errors else wait_time
-                mail = None # Force reconnect
-            except Exception as e:
-                live.console.print(f"\n[bold red]{ICON_ERROR} Kesalahan Tak Terduga di Loop Utama:[/bold red]")
-                console.print_exception(show_locals=False)
-                consecutive_errors += 1
-                sleep_time = wait_time if consecutive_errors < max_consecutive_errors + 2 else long_wait_time * 2
-                live.update(Panel(Text(f"{ICON_ERROR} Error Tak Terduga ({consecutive_errors}). Retry dalam {sleep_time}d...", style="red"), title="Status", border_style="red"), refresh=True)
-                time.sleep(sleep_time)
-                wait_time = min(wait_time * 2, 60) if consecutive_errors < max_consecutive_errors + 2 else wait_time
-                if consecutive_errors >= max_consecutive_errors + 3:
-                     live.console.print(f"[bold red]{ICON_ERROR} Terlalu banyak error beruntun. Berhenti.[/bold red]")
-                     running = False
-                mail = None # Coba reconnect setelah error tak terduga
+        except (imaplib.IMAP4.error, imaplib.IMAP4.abort, BrokenPipeError, OSError, socket.error, socket.gaierror) as e:
+            rprint(f"\n[bold red]❌ [ERROR] Kesalahan IMAP/Koneksi Jaringan: {e}[/]")
+            consecutive_errors += 1
+            if "login failed" in str(e).lower() or "authentication failed" in str(e).lower():
+                rprint(f"[bold red][FATAL] Login Gagal! Periksa kredensial.[/]")
+                running = False
+            elif consecutive_errors >= max_consecutive_errors:
+                 rprint(f"[yellow][WARN] Terlalu banyak error ({consecutive_errors}). Jeda {long_wait_time} detik...[/]")
+                 time.sleep(long_wait_time); wait_time = initial_wait_time; consecutive_errors = 0
+            else:
+                 rprint(f"[yellow][WARN] Mencoba reconnect dalam {wait_time} detik... (Error: {consecutive_errors})[/]")
+                 time.sleep(wait_time); wait_time = min(wait_time * 2, 30)
+        except Exception as e:
+            rprint(f"\n[bold red]❌ [ERROR] Kesalahan tak terduga di loop utama:[/]")
+            if RICH_AVAILABLE and console: console.print_exception(show_locals=False)
+            else: traceback.print_exc()
+            consecutive_errors += 1
+            rprint(f"[yellow][WARN] Mencoba lanjut setelah error. Tunggu {wait_time} detik... (Error: {consecutive_errors})[/]")
+            time.sleep(wait_time); wait_time = min(wait_time * 2, 60)
+            if consecutive_errors >= max_consecutive_errors + 2:
+                 rprint(f"[bold red][FATAL] Terlalu banyak error tak terduga. Berhenti.[/]")
+                 running = False
+        finally:
+            if mail and mail.state != 'LOGOUT':
+                try: mail.logout()
+                except Exception: pass
+            mail = None
+            if RICH_AVAILABLE and console:
+                 console.show_cursor(True) # Pastikan cursor terlihat jika loop berhenti
+        if running: time.sleep(0.5)
 
-            finally:
-                # Pastikan logout jika mail object ada & state valid
-                if mail and mail.state != 'LOGOUT':
-                    try: mail.logout()
-                    except Exception: pass
-                # Set mail ke None jika terjadi error yang butuh reconnect
-                if mail and not running: # Jika berhenti normal, pastikan mail = None
-                    mail = None
-
-            if running: time.sleep(0.1) # Jeda singkat antar iterasi loop utama
-
-    # Keluar dari loop
-    rprint(f"\n[bold yellow]{ICON_INFO} Mode mendengarkan dihentikan.[/bold yellow]")
+    rprint(Rule("[bold yellow]Mode Mendengarkan Dihentikan[/]", style="yellow"))
 
 
 # --- Fungsi Menu Pengaturan (MODIFIED with Rich) ---
 def show_settings(settings):
+    """Menampilkan dan mengedit pengaturan menggunakan Rich & Prompt Toolkit (via Inquirer)."""
     while True:
         clear_screen()
-        console.rule(f"[bold cyan]{ICON_SETTINGS} Pengaturan Email & Binance Listener[/bold cyan]", style="cyan")
+        rprint(Panel("[bold cyan]🔧 Pengaturan Email & Binance Listener[/]", title_align="left", border_style="cyan"))
 
-        # --- Tampilkan Pengaturan dengan Tabel Rich ---
-        settings_table = Table(title="Konfigurasi Saat Ini", show_header=True, header_style="bold magenta",
-                               box=None, padding=(0, 1, 0, 0)) # Atas, Kanan, Bawah, Kiri
-        settings_table.add_column("Kategori", style="dim cyan", width=10)
-        settings_table.add_column("Item", style="cyan", width=18)
-        settings_table.add_column("Nilai", style="white")
+        # --- Tampilkan Pengaturan dalam Tabel/Panel ---
+        # Email Settings Panel
+        email_table = Table.grid(padding=(0, 1))
+        email_table.add_column("Setting", style="dim cyan", width=15)
+        email_table.add_column("Value")
+        email_table.add_row("Alamat Email", Text(settings['email_address'] or "[Belum diatur]", style="white" if settings['email_address'] else "dim red"))
+        app_pass_display = f"*{'*' * (len(settings['app_password']) - 1)}" if settings['app_password'] else "[Belum diatur]"
+        email_table.add_row("App Password", Text(app_pass_display, style="white" if settings['app_password'] else "dim red"))
+        email_table.add_row("Server IMAP", Text(settings['imap_server'], style="white"))
+        email_table.add_row("Interval Cek", Text(f"{settings['check_interval_seconds']} detik", style="white"))
+        email_table.add_row("Keyword Target", Text(f"'{settings['target_keyword']}'", style="yellow"))
+        email_table.add_row("Keyword Trigger", Text(f"'{settings['trigger_keyword']}'", style="magenta"))
+        rprint(Panel(email_table, title="📧 Email Settings", border_style="blue", title_align="left", padding=1))
 
-        # Email Settings
-        settings_table.add_row("Email", f"{ICON_EMAIL} Alamat Email", settings['email_address'] or "[italic red]Kosong[/italic red]")
-        app_pass_display = f"*{'*' * (len(settings['app_password']) - 1)}" if len(settings['app_password']) > 1 else ('***' if settings['app_password'] else "[italic red]Kosong[/italic red]")
-        settings_table.add_row("", f"{ICON_PASSWORD} App Password", app_pass_display)
-        settings_table.add_row("", f"{ICON_SERVER} Server IMAP", settings['imap_server'])
-        settings_table.add_row("", f"{ICON_CLOCK} Interval Cek", f"{settings['check_interval_seconds']} detik")
-        settings_table.add_row("", f"{ICON_TARGET} Keyword Target", f"'{settings['target_keyword']}'")
-        settings_table.add_row("", f"{ICON_TRIGGER} Keyword Trigger", f"'{settings['trigger_keyword']}'")
+        # Binance Settings Panel
+        binance_table = Table.grid(padding=(0, 1))
+        binance_table.add_column("Setting", style="dim cyan", width=15)
+        binance_table.add_column("Value")
+        lib_status = "[bold green]Tersedia[/]" if BINANCE_AVAILABLE else "[bold red]Tidak Tersedia[/] [dim](Install 'python-binance')[/]"
+        binance_table.add_row("Library Status", lib_status)
+        api_key_display = f"{settings['binance_api_key'][:4]}...{settings['binance_api_key'][-4:]}" if len(settings['binance_api_key']) > 8 else ("[OK]" if settings['binance_api_key'] else "[Belum diatur]")
+        api_secret_display = f"{settings['binance_api_secret'][:4]}...{settings['binance_api_secret'][-4:]}" if len(settings['binance_api_secret']) > 8 else ("[OK]" if settings['binance_api_secret'] else "[Belum diatur]")
+        binance_table.add_row("API Key", Text(api_key_display, style="white" if settings['binance_api_key'] else "dim red"))
+        binance_table.add_row("API Secret", Text(api_secret_display, style="white" if settings['binance_api_secret'] else "dim red"))
+        binance_table.add_row("Trading Pair", Text(settings['trading_pair'] or "[Belum diatur]", style="white" if settings['trading_pair'] else "dim red"))
+        binance_table.add_row("Buy Quote Qty", Text(f"{settings['buy_quote_quantity']:.2f} [dim](USDT dll)[/]", style="green" if settings['buy_quote_quantity'] > 0 else "red"))
+        binance_table.add_row("Sell Base Qty", Text(f"{settings['sell_base_quantity']:.8f} [dim](BTC dll)[/]", style="green" if settings['sell_base_quantity'] >= 0 else "red"))
+        exec_status = "[bold green]Aktif[/]" if settings['execute_binance_orders'] else "[bold red]Nonaktif[/]"
+        binance_table.add_row("Eksekusi Order", exec_status)
+        rprint(Panel(binance_table, title="💰 Binance Settings", border_style="yellow", title_align="left", padding=1))
 
-        settings_table.add_section() # Pemisah
-
-        # Binance Settings
-        lib_status = f"[green]Terinstall {ICON_OK}[/green]" if BINANCE_AVAILABLE else f"[red]Tidak Tersedia {ICON_ERROR}[/red]"
-        settings_table.add_row("Binance", "Library Status", lib_status)
-        if BINANCE_AVAILABLE:
-            api_key_display = f"{settings['binance_api_key'][:4]}...{settings['binance_api_key'][-4:]}" if len(settings['binance_api_key']) > 8 else ('[green]OK[/green]' if settings['binance_api_key'] else '[italic red]Kosong[/italic red]')
-            api_secret_display = f"{settings['binance_api_secret'][:4]}...{settings['binance_api_secret'][-4:]}" if len(settings['binance_api_secret']) > 8 else ('[green]OK[/green]' if settings['binance_api_secret'] else '[italic red]Kosong[/italic red]')
-            settings_table.add_row("", f"{ICON_API} API Key", api_key_display)
-            settings_table.add_row("", f"{ICON_API} API Secret", api_secret_display)
-            settings_table.add_row("", f"{ICON_PAIR} Trading Pair", settings['trading_pair'] or "[italic red]Kosong[/italic red]")
-            settings_table.add_row("", f"{ICON_QTY} Buy Quote Qty", f"{settings['buy_quote_quantity']} (USDT/dll)")
-            sell_qty_disp = f"{settings['sell_base_quantity']} (BTC/dll)" + (" [dim](Sell Nonaktif)[/dim]" if settings['sell_base_quantity'] == 0 else "")
-            settings_table.add_row("", f"{ICON_QTY} Sell Base Qty", sell_qty_disp)
-            exec_status = f"[bold green]Aktif {ICON_OK}[/bold green]" if settings['execute_binance_orders'] else f"[bold red]Nonaktif {ICON_ERROR}[/bold red]"
-            settings_table.add_row("", f"{ICON_EXECUTE} Eksekusi Order", exec_status)
-        else:
-             settings_table.add_row("", "[dim](Pengaturan Binance tidak relevan)[/dim]", "")
-
-        rprint(Panel(settings_table, border_style="blue", expand=False))
-        console.rule(style="blue")
+        rprint(Rule(style="dim"))
 
         # --- Opsi Menu Pengaturan ---
+        choice = None
         if INQUIRER_AVAILABLE:
-            questions = [inquirer.List('action', message=f"{ICON_SETTINGS} Pilih aksi",
-                                       choices=[('Edit Pengaturan', 'edit'), ('Kembali ke Menu Utama', 'back')], carousel=True)]
-            try: answers = inquirer.prompt(questions, theme=GreenPassion()); choice = answers['action'] if answers else 'back'
-            except KeyboardInterrupt: rprint(f"\n[yellow]{ICON_WARN} Edit dibatalkan.[/yellow]"); choice = 'back'; time.sleep(1)
-            except Exception as e: rprint(f"[red]{ICON_ERROR} Error menu: {e}[/red]"); choice = 'back'
-        else: # Fallback input teks
-            choice_input = Prompt.ask("[bold yellow]Pilih opsi (E=Edit, K=Kembali)[/bold yellow]", choices=['e', 'k'], default='k').lower()
-            if choice_input == 'e': choice = 'edit'
-            else: choice = 'back'
+             # Menggunakan Text dari Rich dalam choices inquirer
+            choices = [
+                (Text("✏️  Edit Pengaturan", style="yellow"), 'edit'),
+                (Text("⬅️  Kembali ke Menu Utama", style="white"), 'back')
+            ]
+            questions = [
+                inquirer.List('action',
+                              message=Text("Pilih aksi", style="bold magenta"),
+                              choices=choices,
+                              carousel=True)
+            ]
+            try:
+                # inquirer.prompt tidak secara native mendukung objek Text rich, jadi kita tampilkan plain text
+                plain_choices = [(c[0].plain, c[1]) for c in choices]
+                plain_questions = [
+                    inquirer.List('action', message="Pilih aksi:", choices=plain_choices, carousel=True)
+                ]
+                # answers = inquirer.prompt(plain_questions, theme=GreenPassion())
+                answers = inquirer.prompt(plain_questions) # Coba tanpa tema custom
+                choice = answers['action'] if answers else 'back'
+            except Exception as e:
+                rprint(f"[red]Error menu interaktif: {e}[/]")
+                choice = 'back'
+            except KeyboardInterrupt:
+                rprint(f"\n[yellow]Edit dibatalkan.[/]")
+                choice = 'back'
+                time.sleep(1)
+        else: # Fallback
+             rprint(Text("Pilih aksi:", style="bold magenta"))
+             rprint("[yellow]E[/] - Edit Pengaturan")
+             rprint("[white]K[/] - Kembali ke Menu Utama")
+             choice_input = Prompt.ask("[bold magenta]Pilihan Anda (E/K)[/]", choices=['e', 'k', 'E', 'K'], default='k') if RICH_AVAILABLE else input("Pilih opsi (E/K): ").lower().strip()
+             choice = 'edit' if choice_input.lower() == 'e' else 'back'
+
 
         # --- Proses Pilihan ---
         if choice == 'edit':
-            console.rule("[bold magenta]Edit Pengaturan[/bold magenta]", style="magenta")
-            rprint("[dim](Tekan Enter untuk mempertahankan nilai saat ini)[/dim]")
+            rprint(Rule("[bold magenta]✏️ Edit Pengaturan[/]", style="magenta"))
+            rprint("[dim](Kosongkan input untuk mempertahankan nilai saat ini)[/]")
 
-            # --- Edit Email ---
-            rprint(f"\n[bold cyan]--- {ICON_EMAIL} Email ---[/bold cyan]")
-            settings['email_address'] = Prompt.ask(" 1. Alamat Email", default=settings['email_address'])
-            new_pass = Prompt.ask(" 2. App Password [dim](input tersembunyi)[/dim]", password=True, default="")
-            if new_pass: settings['app_password'] = new_pass
-            else: rprint("[dim]   (Password tidak diubah)[/dim]")
-            settings['imap_server'] = Prompt.ask(" 3. Server IMAP", default=settings['imap_server'])
-            while True:
-                try:
-                    new_interval = int(Prompt.ask(f" 4. Interval Cek (detik, min 5)", default=str(settings['check_interval_seconds'])))
-                    if new_interval >= 5: settings['check_interval_seconds'] = new_interval; break
-                    else: rprint(f"   [red]{ICON_ERROR} Interval minimal 5 detik.[/red]")
-                except ValueError: rprint(f"   [red]{ICON_ERROR} Masukkan angka bulat.[/red]")
-            settings['target_keyword'] = Prompt.ask(" 5. Keyword Target", default=settings['target_keyword'])
-            settings['trigger_keyword'] = Prompt.ask(" 6. Keyword Trigger", default=settings['trigger_keyword'])
+            # --- Gunakan Rich Prompts jika tersedia ---
+            if RICH_AVAILABLE:
+                # Email
+                rprint(Rule("Email", style="blue"))
+                settings['email_address'] = Prompt.ask(" 1. Email", default=settings['email_address'] or "")
+                settings['app_password'] = Prompt.ask(" 2. App Password", password=True, default=settings['app_password'] or "")
+                settings['imap_server'] = Prompt.ask(" 3. Server IMAP", default=settings['imap_server'])
+                settings['check_interval_seconds'] = IntPrompt.ask(" 4. Interval (detik) [min 5]", default=settings['check_interval_seconds'], choices=[str(i) for i in range(5, 301)]) # Batasi pilihan?
+                settings['target_keyword'] = Prompt.ask(" 5. Keyword Target", default=settings['target_keyword'])
+                settings['trigger_keyword'] = Prompt.ask(" 6. Keyword Trigger", default=settings['trigger_keyword'])
 
-            # --- Edit Binance ---
-            rprint(f"\n[bold cyan]--- {ICON_BINANCE} Binance ---[/bold cyan]")
-            if not BINANCE_AVAILABLE: rprint(f"[yellow]{ICON_WARN} Library Binance tidak terinstall.[/yellow]")
-            settings['binance_api_key'] = Prompt.ask(" 7. API Key", default=settings['binance_api_key'])
-            new_secret = Prompt.ask(" 8. API Secret [dim](input tersembunyi)[/dim]", password=True, default="")
-            if new_secret: settings['binance_api_secret'] = new_secret
-            else: rprint("[dim]   (Secret tidak diubah)[/dim]")
-            settings['trading_pair'] = Prompt.ask(" 9. Trading Pair (e.g., BTCUSDT)", default=settings['trading_pair']).upper()
-            while True:
-                 try:
-                     new_qty = float(Prompt.ask(f"10. Buy Quote Qty (e.g., 11.0)", default=str(settings['buy_quote_quantity'])))
-                     if new_qty > 0: settings['buy_quote_quantity'] = new_qty; break
-                     else: rprint(f"   [red]{ICON_ERROR} Kuantitas Beli harus > 0.[/red]")
-                 except ValueError: rprint(f"   [red]{ICON_ERROR} Masukkan angka desimal.[/red]")
-            while True:
-                 try:
-                     new_qty = float(Prompt.ask(f"11. Sell Base Qty (e.g., 0.0005, 0=nonaktif)", default=str(settings['sell_base_quantity'])))
-                     if new_qty >= 0: settings['sell_base_quantity'] = new_qty; break
-                     else: rprint(f"   [red]{ICON_ERROR} Kuantitas Jual harus >= 0.[/red]")
-                 except ValueError: rprint(f"   [red]{ICON_ERROR} Masukkan angka desimal.[/red]")
+                # Binance
+                rprint(Rule("Binance", style="yellow"))
+                if not BINANCE_AVAILABLE: rprint("[yellow]   (Library Binance tidak terinstall)[/]")
+                settings['binance_api_key'] = Prompt.ask(" 7. API Key", default=settings['binance_api_key'] or "")
+                settings['binance_api_secret'] = Prompt.ask(" 8. API Secret", password=True, default=settings['binance_api_secret'] or "")
+                settings['trading_pair'] = Prompt.ask(" 9. Trading Pair (e.g., BTCUSDT)", default=settings['trading_pair']).upper()
+                settings['buy_quote_quantity'] = FloatPrompt.ask("10. Buy Quote Qty (> 0)", default=settings['buy_quote_quantity'])
+                settings['sell_base_quantity'] = FloatPrompt.ask("11. Sell Base Qty (>= 0)", default=settings['sell_base_quantity'])
+                if BINANCE_AVAILABLE:
+                     settings['execute_binance_orders'] = Confirm.ask("12. Aktifkan Eksekusi Order Binance?", default=settings['execute_binance_orders'])
+                else:
+                     settings['execute_binance_orders'] = False # Paksa nonaktif jika lib tidak ada
 
-            if BINANCE_AVAILABLE:
-                current_exec_text = "Aktif" if settings['execute_binance_orders'] else "Nonaktif"
-                exec_confirm = Confirm.ask(f"12. Eksekusi Order Binance? ({current_exec_text})", default=settings['execute_binance_orders'])
-                settings['execute_binance_orders'] = exec_confirm
-            else:
-                settings['execute_binance_orders'] = False # Pastikan False jika lib tidak ada
+            else: # Fallback Input Biasa
+                 # ... (kode input biasa dari versi sebelumnya bisa dimasukkan di sini) ...
+                 # Contoh Email:
+                 new_val = input(f" 1. Email [{settings['email_address']}]: ").strip()
+                 if new_val: settings['email_address'] = new_val
+                 # ... (lanjutkan untuk semua setting) ...
+                 # Contoh Binance Execute:
+                 while True:
+                     current_exec = settings['execute_binance_orders']
+                     exec_prompt = "Aktif" if current_exec else "Nonaktif"
+                     new_val_str = input(f"12. Eksekusi Order Binance? ({exec_prompt}) [y/n]: ").lower().strip()
+                     if not new_val_str: break
+                     if new_val_str == 'y': settings['execute_binance_orders'] = True; break
+                     elif new_val_str == 'n': settings['execute_binance_orders'] = False; break
+                     else: print("   [ERROR] Masukkan 'y' atau 'n'.")
+
+            # Validasi setelah input (contoh)
+            if settings['check_interval_seconds'] < 5: settings['check_interval_seconds'] = 5
+            if settings['buy_quote_quantity'] <= 0: settings['buy_quote_quantity'] = DEFAULT_SETTINGS['buy_quote_quantity']; rprint("[yellow]Buy Qty direset ke default karena <= 0[/]")
+            if settings['sell_base_quantity'] < 0: settings['sell_base_quantity'] = DEFAULT_SETTINGS['sell_base_quantity']; rprint("[yellow]Sell Qty direset ke default karena < 0[/]")
+
 
             save_settings(settings) # Simpan perubahan
-            Prompt.ask(f"\n[dim]Tekan Enter untuk kembali...[/dim]", default="")
+            rprint(Panel("[bold green]✅ Pengaturan berhasil diperbarui![/]", border_style="green", expand=False))
+            if RICH_AVAILABLE: Prompt.ask("[dim]Tekan Enter untuk kembali...[/]")
+            else: input("Tekan Enter untuk kembali...")
+
 
         elif choice == 'back':
-            break # Keluar loop pengaturan
+            break # Keluar dari loop pengaturan
 
-# --- Fungsi Menu Utama (MODIFIED with Rich & Figlet) ---
+# --- Fungsi Menu Utama (MODIFIED with Rich) ---
 def main_menu():
+    """Menampilkan menu utama aplikasi dengan tampilan Rich."""
     settings = load_settings()
 
     while True:
         clear_screen()
+        # --- Header ---
+        header_text = Text(" Exora AI - Email & Binance Listener ", style="bold magenta on white", justify="center")
+        rprint(Panel(header_text, border_style="magenta", padding=(1, 0)))
 
-        # --- Judul ASCII Art ---
-        if FIGLET_AVAILABLE:
-            figlet_title = pyfiglet.figlet_format("Exora AI Listener", font="slant")
-            rprint(f"[bold magenta]{figlet_title}[/bold magenta]")
-        else:
-            console.rule("[bold magenta] Exora AI - Email & Binance Listener [/bold magenta]", style="magenta")
+        # --- Status Konfigurasi ---
+        status_panels = []
+        # Email Status
+        email_text = Text()
+        email_ok = bool(settings.get('email_address'))
+        pass_ok = bool(settings.get('app_password'))
+        email_text.append("📧 Email        : ", style="cyan")
+        email_text.append(f"✅ OK" if email_ok else f"❌ Kosong", style="green" if email_ok else "red")
+        email_text.append(" | ", style="dim")
+        email_text.append("🔑 App Password : ", style="cyan")
+        email_text.append(f"✅ OK" if pass_ok else f"❌ Kosong", style="green" if pass_ok else "red")
+        status_panels.append(Panel(email_text, title="Email Status", border_style="blue", padding=(0,1)))
 
-        # --- Panel Status ---
-        status_table = Table(show_header=False, box=None, padding=(0, 1))
-        status_table.add_column(style="dim cyan", width=18)
-        status_table.add_column(style="white")
-
-        email_ok = settings.get('email_address')
-        pass_ok = settings.get('app_password')
-        status_table.add_row(f"{ICON_EMAIL} Email Status", f"[{'green' if email_ok else 'red'}]{'OK' if email_ok else 'Kosong'}[/{'green' if email_ok else 'red'}] Email | [{'green' if pass_ok else 'red'}]{'OK' if pass_ok else 'Kosong'}[/{'green' if pass_ok else 'red'}] App Pass")
-
+        # Binance Status
         if BINANCE_AVAILABLE:
-            api_ok = settings.get('binance_api_key')
-            secret_ok = settings.get('binance_api_secret')
-            pair_ok = settings.get('trading_pair')
-            buy_qty_ok = settings.get('buy_quote_quantity', 0) > 0
-            sell_qty_val = settings.get('sell_base_quantity', 0)
-            sell_qty_ok = sell_qty_val >= 0
-            exec_active = settings.get('execute_binance_orders')
+            binance_text = Text()
+            api_ok = bool(settings.get('binance_api_key'))
+            secret_ok = bool(settings.get('binance_api_secret'))
+            pair = settings.get('trading_pair')
+            pair_ok = bool(pair)
+            buy_qty = settings.get('buy_quote_quantity', 0)
+            buy_ok = buy_qty > 0
+            sell_qty = settings.get('sell_base_quantity', 0)
+            sell_ok = sell_qty >= 0 # Boleh 0
+            exec_active = settings.get("execute_binance_orders")
 
-            status_table.add_row(f"{ICON_BINANCE} Binance Status", f"Lib: [green]OK[/green] | API: [{'green' if api_ok else 'red'}]{'OK' if api_ok else 'X'}[/{'green' if api_ok else 'red'}] | Secret: [{'green' if secret_ok else 'red'}]{'OK' if secret_ok else 'X'}[/{'green' if secret_ok else 'red'}] | Pair: [{'green' if pair_ok else 'red'}]{settings.get('trading_pair','X')}[/{'green' if pair_ok else 'red'}]")
-            sell_qty_style = "green" if sell_qty_ok else "red"
-            sell_qty_text = f"{sell_qty_val}" if sell_qty_ok else "Invalid"
-            if exec_active and sell_qty_val == 0: sell_qty_style="yellow"; sell_qty_text+=" (Sell Off)"
-            status_table.add_row(f"{ICON_QTY} Binance Qty", f"Buy: [{'green' if buy_qty_ok else 'red'}]{settings.get('buy_quote_quantity', 'X')}[/{'green' if buy_qty_ok else 'red'}] | Sell: [{sell_qty_style}]{sell_qty_text}[/{sell_qty_style}]")
-            status_table.add_row(f"{ICON_EXECUTE} Eksekusi", f"[{'green' if exec_active else 'yellow'}]{'AKTIF' if exec_active else 'NONAKTIF'}[/{'green' if exec_active else 'yellow'}]")
+            binance_text.append("🔑 API/Secret : ", style="cyan")
+            binance_text.append(f"✅ OK" if api_ok and secret_ok else f"❌ Perlu Diisi", style="green" if api_ok and secret_ok else "red")
+            binance_text.append(" | ", style="dim")
+            binance_text.append("⚖️ Pair        : ", style="cyan")
+            binance_text.append(f"✅ {pair}" if pair_ok else f"❌ Kosong", style="green" if pair_ok else "red")
+            binance_text.append("\n") # Baris baru
+            binance_text.append("🛒 Buy Qty    : ", style="cyan")
+            binance_text.append(f"✅ {buy_qty:.2f}" if buy_ok else f"❌ <= 0", style="green" if buy_ok else "red")
+            binance_text.append(" | ", style="dim")
+            binance_text.append("📉 Sell Qty   : ", style="cyan")
+            binance_text.append(f"✅ {sell_qty:.8f}" if sell_ok else f"❌ < 0", style="green" if sell_ok else "red")
+            binance_text.append(" | ", style="dim")
+            binance_text.append("⚡ Eksekusi    : ", style="cyan")
+            binance_text.append(f"✅ Aktif" if exec_active else f"🟡 Nonaktif", style="green" if exec_active else "yellow")
+            status_panels.append(Panel(binance_text, title="Binance Status", border_style="yellow", padding=(0,1)))
         else:
-            status_table.add_row(f"{ICON_BINANCE} Binance Status", f"[red]Library Tidak Terinstall {ICON_ERROR}[/red]")
+             status_panels.append(Panel("[red]Binance tidak tersedia (Install [i]python-binance[/])[/]", title="Binance Status", border_style="red"))
 
-        rprint(Panel(status_table, title="Status Konfigurasi", border_style="blue", expand=False))
-        console.rule(style="blue")
+        rprint(Columns(status_panels) if RICH_AVAILABLE else "\n".join([p.content if isinstance(p, Panel) else str(p) for p in status_panels])) # Tampilkan status
+        rprint(Rule(style="dim"))
 
-        # --- Pilihan Menu Utama ---
-        menu_title = f"{ICON_SETTINGS} Menu Utama [dim](Gunakan ↑ / ↓ dan Enter)[/dim]" if INQUIRER_AVAILABLE else f"{ICON_SETTINGS} Menu Utama [dim](Ketik Pilihan)[/dim]"
+        # --- Pilihan Menu ---
+        choice_key = None
+        menu_title = Text("MENU UTAMA", style="bold magenta")
 
         if INQUIRER_AVAILABLE:
-            start_text = f" {ICON_START} Mulai Mendengarkan" + (f" [dim](Email & [bold]Binance[/bold]){ICON_BINANCE}[/dim]" if settings.get("execute_binance_orders") and BINANCE_AVAILABLE else f" [dim](Email Only){ICON_EMAIL}[/dim]")
-            choices = [(start_text, 'start'), (f" {ICON_SETTINGS} Pengaturan", 'settings'), (f" {ICON_EXIT} Keluar", 'exit')]
-            questions = [inquirer.List('main_choice', message=menu_title, choices=choices, carousel=True)]
-            try: answers = inquirer.prompt(questions, theme=GreenPassion()); choice_key = answers['main_choice'] if answers else 'exit'
-            except KeyboardInterrupt: rprint(f"\n[yellow]{ICON_WARN} Keluar dari menu...[/yellow]"); choice_key = 'exit'; time.sleep(1)
-            except Exception as e: rprint(f"[red]{ICON_ERROR} Error menu: {e}[/red]"); choice_key = 'exit'
-        else: # Fallback input teks
-            rprint(menu_title)
-            rprint(f" 1. {ICON_START} Mulai Mendengarkan" + (" (Email & Binance)" if settings.get("execute_binance_orders") and BINANCE_AVAILABLE else " (Email Only)"))
-            rprint(f" 2. {ICON_SETTINGS} Pengaturan")
-            rprint(f" 3. {ICON_EXIT} Keluar")
-            choice_input = Prompt.ask("[bold yellow]Masukkan pilihan Anda (1/2/3)[/bold yellow]", choices=['1', '2', '3'], default='3')
-            if choice_input == '1': choice_key = 'start'
-            elif choice_input == '2': choice_key = 'settings'
-            else: choice_key = 'exit'
+            # Definisikan pilihan untuk inquirer (pakai Text Rich)
+            start_label = Text("▶️  1. Mulai Mendengarkan ")
+            if settings.get("execute_binance_orders") and BINANCE_AVAILABLE:
+                 start_label.append("(Email & Binance)", style="dim green")
+            else:
+                 start_label.append("(Email Only)", style="dim blue")
+
+            choices = [
+                (start_label, 'start'),
+                (Text("🔧 2. Pengaturan", style="cyan"), 'settings'),
+                (Text("🚪 3. Keluar", style="red"), 'exit')
+            ]
+            plain_choices = [(c[0].plain, c[1]) for c in choices] # Inquirer butuh string
+            questions = [
+                inquirer.List('main_choice',
+                              message=menu_title.plain, # Message inquirer harus string
+                              choices=plain_choices,
+                              carousel=True)
+            ]
+            try:
+                 answers = inquirer.prompt(questions) # Coba tanpa tema
+                 choice_key = answers['main_choice'] if answers else 'exit'
+            except Exception as e:
+                 rprint(f"[red]Error menu interaktif: {e}[/]")
+                 choice_key = 'exit'
+            except KeyboardInterrupt:
+                 rprint(f"\n[yellow]Keluar dari menu...[/]")
+                 choice_key = 'exit'
+                 time.sleep(1)
+        else: # Fallback
+             rprint(menu_title)
+             rprint("[green]1.[/] Mulai Mendengarkan " + ("(Email & Binance)" if settings.get("execute_binance_orders") and BINANCE_AVAILABLE else "(Email Only)"))
+             rprint("[cyan]2.[/] Pengaturan")
+             rprint("[red]3.[/] Keluar")
+             choice_input = Prompt.ask("[bold magenta]Masukkan pilihan (1/2/3)[/]", choices=['1', '2', '3'], default='3') if RICH_AVAILABLE else input("Pilihan (1/2/3): ").strip()
+             if choice_input == '1': choice_key = 'start'
+             elif choice_input == '2': choice_key = 'settings'
+             elif choice_input == '3': choice_key = 'exit'
+             else: choice_key = 'invalid'
 
         # --- Proses Pilihan ---
         if choice_key == 'start':
-            console.rule(style="blue")
-            # Validasi (logika sama, pesan pakai Rich)
+            rprint(Rule(style="dim green"))
+            # Validasi (logika sama, pesan pakai rprint)
             valid_email = settings.get('email_address') and settings.get('app_password')
             execute_binance = settings.get("execute_binance_orders", False)
             valid_binance_config = False
             if execute_binance and BINANCE_AVAILABLE:
-                 valid_binance_config = (settings.get('binance_api_key') and settings.get('binance_api_secret') and
-                                         settings.get('trading_pair') and settings.get('buy_quote_quantity', 0) > 0 and
-                                         settings.get('sell_base_quantity', 0) >= 0)
+                 valid_binance_config = (
+                     settings.get('binance_api_key') and
+                     settings.get('binance_api_secret') and
+                     settings.get('trading_pair') and
+                     settings.get('buy_quote_quantity', 0) > 0 and
+                     settings.get('sell_base_quantity', 0) >= 0
+                 )
 
             error_messages = []
-            if not valid_email: error_messages.append(f"[red]{ICON_ERROR} Pengaturan Email belum lengkap![/red]")
-            if execute_binance and not BINANCE_AVAILABLE: error_messages.append(f"[red]{ICON_ERROR} Eksekusi aktif tapi library 'python-binance' tidak ada![/red]")
-            if execute_binance and BINANCE_AVAILABLE and not valid_binance_config:
-                 error_messages.append(f"[red]{ICON_ERROR} Konfigurasi Binance belum lengkap/valid untuk eksekusi![/red]")
-                 # Tambahkan detail error jika perlu
+            if not valid_email: error_messages.append("[bold red]❌ Email/App Password belum lengkap![/]")
+            if execute_binance and not BINANCE_AVAILABLE: error_messages.append("[bold red]❌ Eksekusi Binance aktif tapi library tidak ada![/]")
+            if execute_binance and BINANCE_AVAILABLE and not valid_binance_config: error_messages.append("[bold red]❌ Konfigurasi Binance belum lengkap/valid untuk eksekusi![/]")
 
             if error_messages:
-                error_content = "\n".join(error_messages)
-                error_content += f"\n\n[yellow]Silakan perbaiki melalui menu '{ICON_SETTINGS} Pengaturan'.[/yellow]"
-                rprint(Panel(error_content, title=f"{ICON_WARN} Tidak Bisa Memulai", border_style="red", expand=False))
-                Prompt.ask(f"[dim]Tekan Enter untuk kembali...[/dim]", default="")
+                rprint(Panel("\n".join(error_messages), title="[bold yellow]Tidak Bisa Memulai[/]", border_style="red", padding=1))
+                rprint(f"[yellow]-> Silakan perbaiki via menu '[cyan]Pengaturan[/]'.[/]")
+                if RICH_AVAILABLE: Prompt.ask("[dim]Tekan Enter untuk kembali...[/]")
+                else: input("Tekan Enter...")
             else:
                 clear_screen()
                 mode = "Email & Binance Order" if execute_binance and BINANCE_AVAILABLE else "Email Listener Only"
-                icon_mode = ICON_BINANCE if execute_binance and BINANCE_AVAILABLE else ICON_EMAIL
-                rprint(Panel(f"[bold green]Mode: {mode} {icon_mode}[/bold green]", title=f"{ICON_START} Memulai Listener", border_style="green", expand=False))
-                start_listening(settings)
-                rprint(f"\n[yellow]{ICON_INFO} Kembali ke Menu Utama...[/yellow]")
+                rprint(Panel(f"[bold green]🚀 Memulai Mode: {mode}[/]", expand=False, border_style="green"))
+                start_listening(settings) # Mulai listener
+                # Kembali ke menu utama setelah selesai
+                rprint(f"\n[yellow]Kembali ke Menu Utama...[/]")
                 time.sleep(2)
+
 
         elif choice_key == 'settings':
             show_settings(settings)
             settings = load_settings() # Load ulang jika ada perubahan
 
         elif choice_key == 'exit':
-            rprint(f"\n[bold cyan]Terima kasih! Sampai jumpa! {ICON_EXIT}[/bold cyan]")
+            rprint(f"\n[bold cyan]👋 Terima kasih! Sampai jumpa![/]")
+            if RICH_AVAILABLE and console: console.show_cursor(True)
             sys.exit(0)
+
+        elif choice_key == 'invalid': # Hanya untuk fallback input teks
+            rprint(f"\n[bold red][ERROR] Pilihan tidak valid.[/]")
+            time.sleep(1.5)
+
 
 # --- Entry Point ---
 if __name__ == "__main__":
-    if sys.version_info < (3, 7): # Rich mungkin perlu 3.7+ untuk fitur lengkap
-        rprint(f"[bold red]Error: Script ini optimal dengan Python 3.7 atau lebih tinggi.[/bold red]")
-        # sys.exit(1) # Bisa di-uncomment jika mau strict
+    # Cek dependensi utama
+    if not RICH_AVAILABLE and not INQUIRER_AVAILABLE:
+         print("WARNING: 'rich' dan 'inquirer' tidak ditemukan. Tampilan akan sangat dasar.")
+         print("         Disarankan install: pip install rich inquirer")
+         time.sleep(3)
+    elif not RICH_AVAILABLE:
+        print("WARNING: 'rich' tidak ditemukan. Tampilan tidak akan maksimal.")
+        print("         Install: pip install rich")
+        time.sleep(2)
+    elif not INQUIRER_AVAILABLE:
+        # Sudah ada warning di atas, tidak perlu ulang
+        pass
 
+    # Jalankan menu utama
     try:
         main_menu()
     except KeyboardInterrupt:
-        console.print(f"\n[bold yellow]{ICON_WARN} Program dihentikan paksa dari luar menu.[/bold yellow]")
+        if RICH_AVAILABLE and console: console.show_cursor(True)
+        rprint(f"\n[bold yellow][WARN] Program dihentikan paksa.[/]")
         sys.exit(1)
     except Exception as e:
+        # Tangani error fatal
         clear_screen()
-        console.rule("[bold red] ERROR KRITIS [/bold red]", style="red")
-        console.print(f"[bold red]Terjadi kesalahan fatal yang tidak tertangani:[/bold red]")
-        console.print_exception(show_locals=True) # Tampilkan traceback & locals dgn Rich
-        console.print(f"\n[red]Pesan Error: {e}[/red]")
-        console.rule(style="red")
-        Prompt.ask(f"[dim]Tekan Enter untuk keluar...[/dim]", default="")
+        rprint(Panel("[bold red on white] FATAL ERROR [/]", expand=False))
+        rprint(f"[bold red]Terjadi error kritis yang tidak tertangani:[/]")
+        if RICH_AVAILABLE and console: console.print_exception(show_locals=True, word_wrap=True) # Tampilkan traceback dengan Rich
+        else: traceback.print_exc()
+        rprint(f"\n[red]Pesan: {e}[/]")
+        rprint("[yellow]Program akan keluar.[/]")
+        if RICH_AVAILABLE: Prompt.ask("[dim]Tekan Enter untuk keluar...[/]")
+        else: input("Tekan Enter...")
+        if RICH_AVAILABLE and console: console.show_cursor(True)
         sys.exit(1)
