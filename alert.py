@@ -4,7 +4,7 @@ import email
 from email.header import decode_header
 import time
 import datetime # Untuk timestamp
-import subprocess
+import subprocess # Penting untuk menjalankan mpg123
 import json
 import os
 import getpass
@@ -13,20 +13,6 @@ import signal # Untuk menangani Ctrl+C
 import traceback # Untuk mencetak traceback error
 import socket # Untuk error koneksi IMAP
 import shutil # Untuk mendapatkan lebar terminal (opsional)
-
-# --- Playsound Integration ---
-try:
-    from playsound import playsound
-    PLAYSOUND_AVAILABLE = True
-except ImportError:
-    PLAYSOUND_AVAILABLE = False
-    print("\n!!! WARNING: Library 'playsound' tidak ditemukan. !!!")
-    print("!!!          Fitur memainkan MP3 tidak akan berfungsi.    !!!")
-    print("!!!          Install dengan: pip install playsound==1.2.2 !!!\n")
-    time.sleep(3)
-    def playsound(filepath):
-        print(f"!!! WARNING: 'playsound' tidak ada, tidak bisa memainkan {os.path.basename(filepath)} !!!")
-        pass
 
 # --- Inquirer Integration ---
 try:
@@ -40,12 +26,12 @@ except ImportError:
     time.sleep(3)
     class InquirerTheme: pass
 
-# --- Konfigurasi & Variabel Global (Binance Dihapus) ---
+# --- Konfigurasi & Variabel Global (Fokus Email & MP3) ---
 CONFIG_FILE = "config.json"
 DEFAULT_SETTINGS = {
     "email_address": "", "app_password": "", "imap_server": "imap.gmail.com",
     "check_interval_seconds": 10, "target_keyword": "Exora AI", "trigger_keyword": "order",
-    "play_mp3_on_signal": True # Fokus pada setting MP3
+    "play_mp3_on_signal": True
 }
 running = True
 
@@ -95,25 +81,22 @@ def print_separator(char='─', color=DIM):
     width = get_terminal_width()
     print(f"{color}{char * width}{RESET}")
 
-# --- Fungsi Konfigurasi (Binance Dihapus) ---
+# --- Fungsi Konfigurasi ---
 def load_settings():
     settings = DEFAULT_SETTINGS.copy()
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
                 loaded_settings = json.load(f)
-                # Update settings dari file, hanya ambil key yang ada di DEFAULT_SETTINGS baru
                 for key in DEFAULT_SETTINGS:
                     if key in loaded_settings:
                         settings[key] = loaded_settings[key]
 
-                # Validasi tipe data
                 settings["check_interval_seconds"] = int(settings.get("check_interval_seconds", 10))
                 if settings["check_interval_seconds"] < 5: settings["check_interval_seconds"] = 5
                 settings["play_mp3_on_signal"] = bool(settings.get("play_mp3_on_signal", True))
 
-                # Simpan kembali jika ada key default baru atau koreksi minor
-                save_settings(settings)
+                save_settings(settings) # Simpan ulang untuk pastikan format & key sesuai
 
         except json.JSONDecodeError:
             print(f"{RED}[ERROR] File konfigurasi '{CONFIG_FILE}' rusak. Menggunakan default & menyimpan ulang.{RESET}")
@@ -128,10 +111,8 @@ def load_settings():
 def save_settings(settings):
     try:
         settings_to_save = {}
-        # Hanya simpan key yang ada di DEFAULT_SETTINGS (tanpa Binance)
         for key in DEFAULT_SETTINGS:
             settings_to_save[key] = settings.get(key, DEFAULT_SETTINGS[key])
-            # Pastikan tipe data benar
             if key == 'check_interval_seconds': settings_to_save[key] = int(settings_to_save[key])
             elif key == 'play_mp3_on_signal': settings_to_save[key] = bool(settings_to_save[key])
 
@@ -176,7 +157,7 @@ def get_text_from_email(msg):
     return " ".join(text_content.split()).lower()
 
 def trigger_beep(action):
-    # (Fungsi ini tetap ada sebagai opsi notifikasi tambahan)
+    # Fungsi beep tetap ada, siapa tahu masih berguna
     try:
         prefix = f"{MAGENTA}{BOLD}[BEEP]{RESET}"
         if action == "buy":
@@ -192,14 +173,11 @@ def trigger_beep(action):
         print(f"{YELLOW}[WARN] Perintah 'beep' tidak ditemukan. {DIM}(Opsional: pkg install beep){RESET}")
     except Exception: pass
 
-# --- Fungsi Pemutaran MP3 ---
+# --- Fungsi Pemutaran MP3 (Menggunakan mpg123) ---
 def play_action_sound(action, settings):
+    """Memainkan file buy.mp3 atau sell.mp3 menggunakan command mpg123."""
     if not settings.get("play_mp3_on_signal", False):
-        return
-
-    if not PLAYSOUND_AVAILABLE:
-        print(f"{YELLOW}[!] Fitur MP3 tidak jalan (library 'playsound' tidak ada).{RESET}")
-        return
+        return # Fitur MP3 dinonaktifkan di setting
 
     action_lower = action.lower()
     if action_lower not in ["buy", "sell"]:
@@ -211,29 +189,52 @@ def play_action_sound(action, settings):
     filepath = os.path.join(script_dir, filename)
 
     prefix = f"{GREEN}{BOLD}[MP3]{RESET}"
-    print(f"{prefix} Mencoba memainkan: {filename}...")
+    print(f"{prefix} Mencoba memainkan: {filename} (via mpg123)...")
 
-    try:
-        playsound(filepath)
-        print(f"{prefix} Selesai memainkan {filename}.")
-    except Exception as e:
+    # 1. Cek dulu apakah file MP3-nya ada
+    if not os.path.exists(filepath):
         print(f"{RED}{BOLD}[X] Gagal memainkan MP3!{RESET}")
-        if not os.path.exists(filepath):
-            print(f"{RED}    └─ File '{filename}' tidak ditemukan di direktori script!{RESET}")
-            print(f"{DIM}       Lokasi: {script_dir}{RESET}")
+        print(f"{RED}    └─ File '{filename}' tidak ditemukan di direktori script!{RESET}")
+        print(f"{DIM}       Lokasi: {script_dir}{RESET}")
+        return
+
+    # 2. Coba jalankan mpg123
+    try:
+        # Opsi '-q' (quiet) agar mpg123 tidak terlalu berisik di terminal
+        result = subprocess.run(
+            ["mpg123", "-q", filepath],
+            check=True,          # Akan raise CalledProcessError jika mpg123 error
+            capture_output=True, # Tangkap output (terutama stderr jika error)
+            text=True            # Agar output berupa string
+        )
+        # Jika tidak ada error (check=True), berarti berhasil
+        print(f"{prefix} Selesai memainkan {filename}.")
+
+    except FileNotFoundError:
+        # Error ini terjadi jika perintah 'mpg123' itu sendiri tidak ditemukan
+        print(f"{RED}{BOLD}[X] Gagal memainkan MP3!{RESET}")
+        print(f"{RED}    └─ Perintah 'mpg123' tidak ditemukan!{RESET}")
+        print(f"{YELLOW}       Pastikan sudah install dengan menjalankan:{RESET}")
+        print(f"{YELLOW}       pkg install mpg123{RESET}")
+
+    except subprocess.CalledProcessError as e:
+        # Error ini terjadi jika mpg123 jalan tapi gagal (misal file rusak, format salah)
+        print(f"{RED}{BOLD}[X] Gagal memainkan MP3 via mpg123!{RESET}")
+        print(f"{RED}    └─ mpg123 keluar dengan error (code: {e.returncode}).{RESET}")
+        # Tampilkan stderr jika ada pesan error dari mpg123
+        if e.stderr:
+            print(f"{DIM}       Pesan error dari mpg123:\n{e.stderr.strip()}{RESET}")
         else:
-            print(f"{RED}    └─ Error: {e}{RESET}")
-            print(f"{DIM}       (Masalah codec, device audio, atau permission?){RESET}")
-            if "codec" in str(e).lower():
-                print(f"{DIM}       (Coba konversi MP3 atau install 'ffmpeg': pkg install ffmpeg){RESET}")
+            print(f"{DIM}       (Tidak ada pesan error spesifik dari mpg123){RESET}")
 
+    except Exception as e:
+        # Tangkap error tak terduga lainnya
+        print(f"{RED}{BOLD}[X] Error tak terduga saat mencoba memainkan MP3 via subprocess:{RESET}")
+        print(f"{RED}    └─ {e}{RESET}")
+        traceback.print_exc() # Tampilkan detail error untuk debug
 
-# --- Fungsi Eksekusi Binance (DIHAPUS) ---
-# (Tidak ada lagi fungsi get_binance_client dan execute_binance_order)
-
-
-# --- Fungsi Pemrosesan Email (Binance Dihapus) ---
-def process_email(mail, email_id, settings): # Hapus parameter binance_client
+# --- Fungsi Pemrosesan Email ---
+def process_email(mail, email_id, settings):
     global running
     if not running: return
 
@@ -273,12 +274,8 @@ def process_email(mail, email_id, settings): # Hapus parameter binance_client
 
                     if action_word in ["buy", "sell"]:
                         print(f"{CYAN}│{RESET} {GREEN}[✓] Trigger '{settings['trigger_keyword']}' -> Aksi: {BOLD}{action_word.upper()}{RESET}")
-
-                        # --- Trigger Aksi: Beep dan/atau MP3 ---
                         trigger_beep(action_word) # Panggil beep (opsional)
-                        play_action_sound(action_word, settings) # Panggil fungsi MP3
-
-                        # --- Tidak ada lagi eksekusi Binance ---
+                        play_action_sound(action_word, settings) # Panggil fungsi MP3 (yg pakai mpg123)
 
                     elif action_word:
                         print(f"{CYAN}│{RESET} {YELLOW}[?] Trigger ditemukan, tapi kata '{action_word}' bukan 'buy'/'sell'.{RESET}")
@@ -292,7 +289,6 @@ def process_email(mail, email_id, settings): # Hapus parameter binance_client
         else:
              print(f"{CYAN}│{RESET} {BLUE}[-] Target '{settings['target_keyword']}' tidak ditemukan.{RESET}")
 
-        # Tandai sudah dibaca
         try:
             mail.store(email_id, '+FLAGS', '\\Seen')
             print(f"{CYAN}│{RESET} {DIM}Email ditandai sudah dibaca.{RESET}")
@@ -305,40 +301,36 @@ def process_email(mail, email_id, settings): # Hapus parameter binance_client
         print(f"{log_prefix} {RED}{BOLD}FATAL Error proses email:{RESET}")
         traceback.print_exc()
 
-
-# --- Fungsi Listening Utama (Binance Dihapus) ---
+# --- Fungsi Listening Utama ---
 def start_listening(settings):
     global running
     running = True
     mail = None
-    # Tidak perlu binance_client lagi
     last_check_time = time.time()
     consecutive_errors = 0
     wait_time = 2
     long_wait = 60
 
-    # --- Tidak ada lagi setup Binance ---
-
-    # Info Mode MP3
     mp3_active = settings.get("play_mp3_on_signal", True)
     print_separator('─', GREEN if mp3_active else YELLOW)
     if mp3_active:
-        print_centered("Mode Pemutaran MP3: AKTIF", GREEN, BOLD)
-        if not PLAYSOUND_AVAILABLE: print(f"{YELLOW}{DIM}   (Tapi library 'playsound' tidak ada, cek warning di atas){RESET}")
-        print(f"{DIM}   (Akan memainkan buy.mp3/sell.mp3 jika sinyal terdeteksi){RESET}")
+        print_centered("Mode Pemutaran MP3: AKTIF (via mpg123)", GREEN, BOLD)
+        # Cek apakah mpg123 ada (opsional, tapi bagus)
+        if shutil.which("mpg123"):
+            print(f"{DIM}   (mpg123 terdeteksi. Perlu: buy.mp3 & sell.mp3){RESET}")
+        else:
+            print(f"{YELLOW}{DIM}   (WARNING: mpg123 tidak terdeteksi! Install: pkg install mpg123){RESET}")
     else:
         print_centered("Mode Pemutaran MP3: NONAKTIF", YELLOW, BOLD)
     print_separator('─', GREEN if mp3_active else YELLOW)
     time.sleep(1)
 
-    # --- Loop Utama ---
     print(f"\n{GREEN}{BOLD}Memulai listener... (Ctrl+C untuk berhenti){RESET}")
     wait_indicator_chars = ['∙', '·', '˙', ' ']
     indicator_idx = 0
 
     while running:
         try:
-            # --- Koneksi IMAP ---
             if not mail or mail.state != 'SELECTED':
                 print(f"\n{CYAN}[...] Menghubungkan ke IMAP {settings['imap_server']}...{RESET}")
                 try:
@@ -364,7 +356,6 @@ def start_listening(settings):
                         except Exception: pass
                     mail = None
 
-            # --- Loop Cek Email & Koneksi Aktif ---
             if mail and mail.state == 'SELECTED':
                 while running:
                     current_time = time.time()
@@ -372,7 +363,6 @@ def start_listening(settings):
                         time.sleep(0.5)
                         continue
 
-                    # Jaga Koneksi dengan NOOP
                     try:
                         status, _ = mail.noop()
                         if status != 'OK':
@@ -383,11 +373,8 @@ def start_listening(settings):
                         except Exception: pass
                         mail = None
                         consecutive_errors += 1
-                        break # Keluar loop inner
+                        break
 
-                    # --- Tidak ada lagi Binance Ping Check ---
-
-                    # Cek Email Baru (UNSEEN)
                     try:
                         status, messages = mail.search(None, '(UNSEEN)')
                         if status != 'OK':
@@ -404,7 +391,7 @@ def start_listening(settings):
                             for i, eid in enumerate(email_ids):
                                 if not running: break
                                 print(f"{DIM}--- Proses email {i+1}/{num} (ID: {eid.decode()}) ---{RESET}")
-                                process_email(mail, eid, settings) # Panggil tanpa binance_client
+                                process_email(mail, eid, settings)
                             if not running: break
                             print(f"{GREEN}[OK] Selesai proses {num} email. Mendengarkan lagi...{RESET}")
                         else:
@@ -458,12 +445,11 @@ def start_listening(settings):
 
     print(f"\n{YELLOW}{BOLD}[INFO] Listener dihentikan.{RESET}")
 
-
-# --- Fungsi Menu Pengaturan (Binance Dihapus) ---
+# --- Fungsi Menu Pengaturan ---
 def show_settings(settings):
     while True:
         clear_screen()
-        print_header("Pengaturan Listener Email MP3") # Update Judul
+        print_header("Pengaturan Listener Email MP3")
 
         print(f"\n{BOLD}{CYAN} E M A I L {RESET}")
         print(f"{DIM}─────────────────────────────{RESET}")
@@ -475,19 +461,20 @@ def show_settings(settings):
         print(f" {CYAN}5. Keyword Target{RESET} : '{settings['target_keyword']}'")
         print(f" {CYAN}6. Keyword Trigger{RESET}: '{settings['trigger_keyword']}'")
 
-        print(f"\n{BOLD}{YELLOW} M P 3   S I G N A L {RESET}")
+        print(f"\n{BOLD}{YELLOW} M P 3   S I G N A L   (via mpg123) {RESET}")
         print(f"{DIM}─────────────────────────────{RESET}")
         mp3_status = f"{GREEN}{BOLD}Aktif{RESET}" if settings['play_mp3_on_signal'] else f"{YELLOW}Nonaktif{RESET}"
         print(f" {YELLOW}7. Mainkan MP3?{RESET}   : {mp3_status}")
-        if settings['play_mp3_on_signal']:
-             lib_stat = f"{GREEN}OK{RESET}" if PLAYSOUND_AVAILABLE else f"{RED}Tidak Ada!{RESET}"
-             print(f"   {DIM}└─ Library 'playsound': {lib_stat} {DIM} (Perlu: buy.mp3 & sell.mp3){RESET}")
+        # Tidak perlu cek library 'playsound' lagi
+        mpg123_ok = shutil.which("mpg123") is not None
+        mpg123_stat = f"{GREEN}OK{RESET}" if mpg123_ok else f"{RED}Tidak Ada!{RESET}"
+        print(f"   {DIM}└─ Perintah 'mpg123': {mpg123_stat} {DIM} (Perlu: buy.mp3 & sell.mp3){RESET}")
+        if not mpg123_ok:
+            print(f"     {RED}{DIM}↳ Install dengan: pkg install mpg123{RESET}")
 
-        # --- Tidak ada lagi bagian Binance ---
 
         print_separator(color=MAGENTA)
 
-        # --- Opsi Menu Pengaturan ---
         if INQUIRER_AVAILABLE:
             questions = [
                 inquirer.List('action',
@@ -500,16 +487,14 @@ def show_settings(settings):
                  choice = answers['action'] if answers else 'back'
             except Exception as e: print(f"{RED}Error menu: {e}{RESET}"); choice = 'back'
             except KeyboardInterrupt: print(f"\n{YELLOW}Edit dibatalkan.{RESET}"); choice = 'back'; time.sleep(1)
-        else: # Fallback
+        else:
              choice_input = input("Pilih (E=Edit, K=Kembali): ").lower().strip()
              choice = 'edit' if choice_input == 'e' else 'back'
 
-        # --- Proses Pilihan Edit ---
         if choice == 'edit':
             print(f"\n{BOLD}{MAGENTA}--- Edit Pengaturan ---{RESET}")
             print(f"{DIM}(Kosongkan input untuk skip / tidak ubah){RESET}")
 
-            # Edit Email (Nomor 1-6)
             print(f"\n{CYAN}--- Email ---{RESET}")
             if val := input(f" 1. Email [{settings['email_address']}]: ").strip(): settings['email_address'] = val
             print(f" 2. App Password (input tersembunyi): ", end='', flush=True)
@@ -526,8 +511,7 @@ def show_settings(settings):
             if val := input(f" 5. Keyword Target [{settings['target_keyword']}]: ").strip(): settings['target_keyword'] = val
             if val := input(f" 6. Keyword Trigger [{settings['trigger_keyword']}]: ").strip(): settings['trigger_keyword'] = val
 
-            # Edit MP3 Toggle (Nomor 7)
-            print(f"\n{YELLOW}--- MP3 Signal ---{RESET}")
+            print(f"\n{YELLOW}--- MP3 Signal (via mpg123) ---{RESET}")
             while True:
                  curr = settings['play_mp3_on_signal']
                  prompt = f"{GREEN}Aktif{RESET}" if curr else f"{YELLOW}Nonaktif{RESET}"
@@ -536,8 +520,6 @@ def show_settings(settings):
                  if val_str == 'y': settings['play_mp3_on_signal'] = True; break
                  elif val_str == 'n': settings['play_mp3_on_signal'] = False; break
                  else: print(f"{RED}[!] y/n saja.{RESET}")
-
-            # --- Tidak ada lagi edit Binance ---
 
             save_settings(settings)
             print(f"\n{GREEN}{BOLD}[OK] Pengaturan disimpan!{RESET}")
@@ -549,40 +531,35 @@ def show_settings(settings):
             time.sleep(1.5)
             break
 
-# --- Fungsi Menu Utama (Binance Dihapus) ---
+# --- Fungsi Menu Utama ---
 def main_menu():
     settings = load_settings()
 
     while True:
         clear_screen()
-        print_header("Exora AI - Email Listener MP3") # Update Judul
+        print_header("Exora AI - Email Listener MP3 (via mpg123)")
 
-        # --- Tampilkan Status Ringkas ---
         print(f"\n{BOLD}{CYAN} S T A T U S {RESET}")
         print(f"{DIM}─────────────────────────────{RESET}")
 
-        # Email Status
         email_ok = bool(settings.get('email_address'))
         pass_ok = bool(settings.get('app_password'))
         print(f" {CYAN}Email Listener:{RESET}")
         print(f"   ├─ Config: Email [{GREEN if email_ok else RED}{'✓' if email_ok else 'X'}{RESET}] | App Pass [{GREEN if pass_ok else RED}{'✓' if pass_ok else 'X'}{RESET}]")
         print(f"   └─ Server: {settings.get('imap_server', '?')}, Interval: {settings.get('check_interval_seconds')}s")
 
-        # MP3 Status
-        print(f" {YELLOW}MP3 Signal:{RESET}")
+        print(f" {YELLOW}MP3 Signal (via mpg123):{RESET}")
         mp3_active = settings.get("play_mp3_on_signal", True)
         mp3_status = f"{GREEN}{BOLD}AKTIF{RESET}" if mp3_active else f"{YELLOW}NONAKTIF{RESET}"
         print(f"   ├─ Status  : {mp3_status}")
-        lib_stat = f"{GREEN}✓{RESET}" if PLAYSOUND_AVAILABLE else f"{RED}X{RESET}"
-        print(f"   └─ Req     : Library {lib_stat} | Files (buy/sell.mp3) {DIM}[Cek Manual]{RESET}")
-        if mp3_active and not PLAYSOUND_AVAILABLE:
-             print(f"     {RED}{DIM}↳ Library 'playsound' tidak ada! Install: pip install playsound==1.2.2{RESET}")
-
-        # --- Tidak ada lagi status Binance ---
+        mpg123_ok = shutil.which("mpg123") is not None
+        mpg123_stat = f"{GREEN}✓ Terinstall{RESET}" if mpg123_ok else f"{RED}X Tidak Ditemukan!{RESET}"
+        print(f"   └─ Req     : {mpg123_stat} | Files (buy/sell.mp3) {DIM}[Cek Manual]{RESET}")
+        if mp3_active and not mpg123_ok:
+             print(f"     {RED}{DIM}↳ 'mpg123' tidak ada! Install: pkg install mpg123{RESET}")
 
         print_separator(color=MAGENTA)
 
-        # --- Pilihan Menu Utama ---
         menu_prompt = f"{YELLOW}Pilih Menu {DIM}(↑/↓ Enter){RESET}" if INQUIRER_AVAILABLE else f"{YELLOW}Ketik Pilihan:{RESET}"
 
         if INQUIRER_AVAILABLE:
@@ -602,7 +579,7 @@ def main_menu():
                 choice_key = answers['main_choice'] if answers else 'exit'
             except Exception as e: print(f"{RED}Menu error: {e}{RESET}"); choice_key = 'exit'
             except KeyboardInterrupt: print(f"\n{YELLOW}Keluar...{RESET}"); choice_key = 'exit'; time.sleep(1)
-        else: # Fallback
+        else:
             print(f"\n{menu_prompt}")
             print(f" 1. Mulai Listener")
             print(f" 2. Pengaturan")
@@ -612,33 +589,31 @@ def main_menu():
             choice_map = {'1': 'start', '2': 'settings', '3': 'exit'}
             choice_key = choice_map.get(choice_input, 'invalid')
 
-        # --- Proses Pilihan ---
         if choice_key == 'start':
             print_separator()
             errors = []
-            # Validasi Email
             if not settings.get('email_address') or not settings.get('app_password'):
                 errors.append("Email/App Password belum lengkap.")
 
-            # Validasi MP3 jika aktif
             mp3_active = settings.get("play_mp3_on_signal", True)
-            if mp3_active and not PLAYSOUND_AVAILABLE:
-                errors.append("Mode MP3 aktif tapi library 'playsound' tidak ditemukan.")
-                # Anda bisa menambahkan pengecekan file mp3 di sini jika mau
-                # script_dir = os.path.dirname(os.path.abspath(__file__))
-                # if not os.path.exists(os.path.join(script_dir, 'buy.mp3')): errors.append("File buy.mp3 tidak ada.")
-                # if not os.path.exists(os.path.join(script_dir, 'sell.mp3')): errors.append("File sell.mp3 tidak ada.")
+            # Validasi mpg123 jika MP3 aktif
+            if mp3_active and not shutil.which("mpg123"):
+                errors.append("Mode MP3 aktif tapi perintah 'mpg123' tidak ditemukan. (Install: pkg install mpg123)")
+            # Optional: Cek file MP3 sebelum mulai
+            # if mp3_active:
+            #     script_dir = os.path.dirname(os.path.abspath(__file__))
+            #     if not os.path.exists(os.path.join(script_dir, 'buy.mp3')): errors.append("File buy.mp3 tidak ada.")
+            #     if not os.path.exists(os.path.join(script_dir, 'sell.mp3')): errors.append("File sell.mp3 tidak ada.")
 
-            # --- Tidak ada lagi validasi Binance ---
 
             if errors:
                 print(f"\n{BOLD}{RED}--- TIDAK BISA MEMULAI ---{RESET}")
                 for i, err in enumerate(errors): print(f" {RED}{i+1}. {err}{RESET}")
-                print(f"\n{YELLOW}Perbaiki di 'Pengaturan' atau install library yang diperlukan.{RESET}")
+                print(f"\n{YELLOW}Perbaiki di 'Pengaturan' atau install 'mpg123'.{RESET}")
                 input(f"{DIM}Tekan Enter untuk kembali...{RESET}")
             else:
                 clear_screen()
-                mode = "MP3 Mode" if mp3_active else "Email Listener Only"
+                mode = "MP3 Mode (via mpg123)" if mp3_active else "Email Listener Only"
                 print_header(f"Memulai Mode: {mode}")
                 start_listening(settings)
                 print(f"\n{YELLOW}[INFO] Kembali ke Menu Utama...{RESET}")
@@ -646,7 +621,7 @@ def main_menu():
 
         elif choice_key == 'settings':
             show_settings(settings)
-            settings = load_settings() # Muat ulang
+            settings = load_settings()
 
         elif choice_key == 'exit':
             print(f"\n{CYAN}Terima kasih! Sampai jumpa lagi 👋{RESET}")
@@ -661,10 +636,12 @@ if __name__ == "__main__":
     if sys.version_info < (3, 6):
         print("Error: Butuh Python 3.6+"); sys.exit(1)
 
-    if not PLAYSOUND_AVAILABLE:
-        print(f"{YELLOW}Tips: Untuk fitur MP3, jalankan: {RESET}pip install playsound==1.2.2")
+    # Beri tahu user soal mpg123 jika belum ada
+    if not shutil.which("mpg123"):
+        print(f"{YELLOW}Tips: Untuk fitur MP3, script ini butuh 'mpg123'.{RESET}")
+        print(f"{YELLOW}      Jalankan di Termux: {RESET}pkg install mpg123")
         print(f"{DIM}(Pastikan juga file buy.mp3 & sell.mp3 ada di folder script){RESET}")
-        time.sleep(2)
+        time.sleep(3) # Beri waktu baca sebelum menu
 
     try:
         main_menu()
