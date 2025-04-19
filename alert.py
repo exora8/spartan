@@ -4,7 +4,7 @@ import email
 from email.header import decode_header
 import time
 import datetime # Untuk timestamp
-import subprocess # Penting untuk menjalankan mpg123
+import subprocess # Tetap dibutuhkan untuk termux-media-player
 import json
 import os
 import getpass
@@ -12,7 +12,7 @@ import sys
 import signal # Untuk menangani Ctrl+C
 import traceback # Untuk mencetak traceback error
 import socket # Untuk error koneksi IMAP
-import shutil # Untuk mendapatkan lebar terminal (opsional)
+import shutil # Untuk mendapatkan lebar terminal & cek command
 
 # --- Inquirer Integration ---
 try:
@@ -26,7 +26,7 @@ except ImportError:
     time.sleep(3)
     class InquirerTheme: pass
 
-# --- Konfigurasi & Variabel Global (Fokus Email & MP3) ---
+# --- Konfigurasi & Variabel Global ---
 CONFIG_FILE = "config.json"
 DEFAULT_SETTINGS = {
     "email_address": "", "app_password": "", "imap_server": "imap.gmail.com",
@@ -50,6 +50,11 @@ CYAN = "\033[96m"
 def signal_handler(sig, frame):
     global running
     print(f"\n{YELLOW}{BOLD}[WARN] Ctrl+C terdeteksi. Menghentikan program...{RESET}")
+    # Coba hentikan media player jika sedang jalan (opsional)
+    try:
+        subprocess.run(["termux-media-player", "stop"], capture_output=True, timeout=1)
+    except Exception:
+        pass # Abaikan jika gagal
     running = False
     time.sleep(1.5)
     print(f"{RED}{BOLD}[EXIT] Keluar dari program.{RESET}")
@@ -96,7 +101,7 @@ def load_settings():
                 if settings["check_interval_seconds"] < 5: settings["check_interval_seconds"] = 5
                 settings["play_mp3_on_signal"] = bool(settings.get("play_mp3_on_signal", True))
 
-                save_settings(settings) # Simpan ulang untuk pastikan format & key sesuai
+                save_settings(settings)
 
         except json.JSONDecodeError:
             print(f"{RED}[ERROR] File konfigurasi '{CONFIG_FILE}' rusak. Menggunakan default & menyimpan ulang.{RESET}")
@@ -123,6 +128,7 @@ def save_settings(settings):
 
 # --- Fungsi Utilitas Email & Beep ---
 def decode_mime_words(s):
+    # ... (fungsi sama) ...
     if not s: return ""
     try:
         decoded_parts = decode_header(s)
@@ -136,6 +142,7 @@ def decode_mime_words(s):
     except Exception: return str(s) if isinstance(s, str) else "[DecodeErr]"
 
 def get_text_from_email(msg):
+    # ... (fungsi sama) ...
     text_content = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -157,7 +164,7 @@ def get_text_from_email(msg):
     return " ".join(text_content.split()).lower()
 
 def trigger_beep(action):
-    # Fungsi beep tetap ada, siapa tahu masih berguna
+    # ... (fungsi sama, opsional) ...
     try:
         prefix = f"{MAGENTA}{BOLD}[BEEP]{RESET}"
         if action == "buy":
@@ -173,11 +180,11 @@ def trigger_beep(action):
         print(f"{YELLOW}[WARN] Perintah 'beep' tidak ditemukan. {DIM}(Opsional: pkg install beep){RESET}")
     except Exception: pass
 
-# --- Fungsi Pemutaran MP3 (Menggunakan mpg123) ---
+# --- Fungsi Pemutaran MP3 (Menggunakan Termux:API) ---
 def play_action_sound(action, settings):
-    """Memainkan file buy.mp3 atau sell.mp3 menggunakan command mpg123."""
+    """Memainkan file buy.mp3 atau sell.mp3 menggunakan termux-media-player."""
     if not settings.get("play_mp3_on_signal", False):
-        return # Fitur MP3 dinonaktifkan di setting
+        return # Fitur MP3 dinonaktifkan
 
     action_lower = action.lower()
     if action_lower not in ["buy", "sell"]:
@@ -189,52 +196,64 @@ def play_action_sound(action, settings):
     filepath = os.path.join(script_dir, filename)
 
     prefix = f"{GREEN}{BOLD}[MP3]{RESET}"
-    print(f"{prefix} Mencoba memainkan: {filename} (via mpg123)...")
+    print(f"{prefix} Mencoba memainkan: {filename} (via termux-media-player)...")
 
-    # 1. Cek dulu apakah file MP3-nya ada
+    # 1. Cek file MP3 ada
     if not os.path.exists(filepath):
         print(f"{RED}{BOLD}[X] Gagal memainkan MP3!{RESET}")
         print(f"{RED}    └─ File '{filename}' tidak ditemukan di direktori script!{RESET}")
         print(f"{DIM}       Lokasi: {script_dir}{RESET}")
         return
 
-    # 2. Coba jalankan mpg123
+    # 2. Coba jalankan termux-media-player
     try:
-        # Opsi '-q' (quiet) agar mpg123 tidak terlalu berisik di terminal
+        # Cek dulu apakah command `termux-media-player` ada
+        if not shutil.which("termux-media-player"):
+            raise FileNotFoundError("Perintah 'termux-media-player' tidak ditemukan.")
+
+        # Perintahnya simpel: termux-media-player play <namafile>
         result = subprocess.run(
-            ["mpg123", "-q", filepath],
-            check=True,          # Akan raise CalledProcessError jika mpg123 error
-            capture_output=True, # Tangkap output (terutama stderr jika error)
-            text=True            # Agar output berupa string
+            ["termux-media-player", "play", filepath],
+            check=True,          # Raise error jika command gagal
+            capture_output=True, # Tangkap output
+            text=True,
+            timeout=10 # Tambahkan timeout agar tidak hang jika API bermasalah
         )
-        # Jika tidak ada error (check=True), berarti berhasil
-        print(f"{prefix} Selesai memainkan {filename}.")
+        # Jika berhasil, termux-media-player biasanya tidak banyak output
+        print(f"{prefix} Perintah play '{filename}' dikirim ke Termux:API.")
+        # Catatan: Playback mungkin berjalan di background, script lanjut
 
     except FileNotFoundError:
-        # Error ini terjadi jika perintah 'mpg123' itu sendiri tidak ditemukan
+        # Error jika perintah 'termux-media-player' tidak ada
         print(f"{RED}{BOLD}[X] Gagal memainkan MP3!{RESET}")
-        print(f"{RED}    └─ Perintah 'mpg123' tidak ditemukan!{RESET}")
+        print(f"{RED}    └─ Perintah 'termux-media-player' tidak ditemukan!{RESET}")
         print(f"{YELLOW}       Pastikan sudah install dengan menjalankan:{RESET}")
-        print(f"{YELLOW}       pkg install mpg123{RESET}")
+        print(f"{YELLOW}       pkg install termux-api{RESET}")
+        print(f"{DIM}       (Mungkin juga perlu install aplikasi Termux:API dari store){RESET}")
+
+    except subprocess.TimeoutExpired:
+         print(f"{RED}{BOLD}[X] Gagal memainkan MP3 via termux-media-player!{RESET}")
+         print(f"{RED}    └─ Perintah timed out. Termux:API mungkin tidak responsif.{RESET}")
 
     except subprocess.CalledProcessError as e:
-        # Error ini terjadi jika mpg123 jalan tapi gagal (misal file rusak, format salah)
-        print(f"{RED}{BOLD}[X] Gagal memainkan MP3 via mpg123!{RESET}")
-        print(f"{RED}    └─ mpg123 keluar dengan error (code: {e.returncode}).{RESET}")
-        # Tampilkan stderr jika ada pesan error dari mpg123
+        # Error jika termux-media-player jalan tapi gagal
+        print(f"{RED}{BOLD}[X] Gagal memainkan MP3 via termux-media-player!{RESET}")
+        print(f"{RED}    └─ termux-media-player keluar dengan error (code: {e.returncode}).{RESET}")
         if e.stderr:
-            print(f"{DIM}       Pesan error dari mpg123:\n{e.stderr.strip()}{RESET}")
-        else:
-            print(f"{DIM}       (Tidak ada pesan error spesifik dari mpg123){RESET}")
+            print(f"{DIM}       Pesan error:\n{e.stderr.strip()}{RESET}")
+        if e.stdout:
+            print(f"{DIM}       Output:\n{e.stdout.strip()}{RESET}")
+        print(f"{DIM}       (Cek apakah file MP3 valid dan Termux:API berfungsi?){RESET}")
 
     except Exception as e:
-        # Tangkap error tak terduga lainnya
-        print(f"{RED}{BOLD}[X] Error tak terduga saat mencoba memainkan MP3 via subprocess:{RESET}")
+        # Error tak terduga lainnya
+        print(f"{RED}{BOLD}[X] Error tak terduga saat mencoba memainkan MP3 via Termux:API:{RESET}")
         print(f"{RED}    └─ {e}{RESET}")
-        traceback.print_exc() # Tampilkan detail error untuk debug
+        traceback.print_exc()
 
 # --- Fungsi Pemrosesan Email ---
 def process_email(mail, email_id, settings):
+    # ... (fungsi sama, panggil play_action_sound yg baru) ...
     global running
     if not running: return
 
@@ -275,7 +294,7 @@ def process_email(mail, email_id, settings):
                     if action_word in ["buy", "sell"]:
                         print(f"{CYAN}│{RESET} {GREEN}[✓] Trigger '{settings['trigger_keyword']}' -> Aksi: {BOLD}{action_word.upper()}{RESET}")
                         trigger_beep(action_word) # Panggil beep (opsional)
-                        play_action_sound(action_word, settings) # Panggil fungsi MP3 (yg pakai mpg123)
+                        play_action_sound(action_word, settings) # Panggil fungsi MP3 (yg pakai Termux:API)
 
                     elif action_word:
                         print(f"{CYAN}│{RESET} {YELLOW}[?] Trigger ditemukan, tapi kata '{action_word}' bukan 'buy'/'sell'.{RESET}")
@@ -301,8 +320,10 @@ def process_email(mail, email_id, settings):
         print(f"{log_prefix} {RED}{BOLD}FATAL Error proses email:{RESET}")
         traceback.print_exc()
 
+
 # --- Fungsi Listening Utama ---
 def start_listening(settings):
+    # ... (fungsi sama) ...
     global running
     running = True
     mail = None
@@ -312,14 +333,15 @@ def start_listening(settings):
     long_wait = 60
 
     mp3_active = settings.get("play_mp3_on_signal", True)
+    termux_api_ok = shutil.which("termux-media-player") is not None
+
     print_separator('─', GREEN if mp3_active else YELLOW)
     if mp3_active:
-        print_centered("Mode Pemutaran MP3: AKTIF (via mpg123)", GREEN, BOLD)
-        # Cek apakah mpg123 ada (opsional, tapi bagus)
-        if shutil.which("mpg123"):
-            print(f"{DIM}   (mpg123 terdeteksi. Perlu: buy.mp3 & sell.mp3){RESET}")
+        print_centered("Mode Pemutaran MP3: AKTIF (via Termux:API)", GREEN, BOLD)
+        if termux_api_ok:
+            print(f"{DIM}   (Termux:API terdeteksi. Perlu: buy.mp3 & sell.mp3){RESET}")
         else:
-            print(f"{YELLOW}{DIM}   (WARNING: mpg123 tidak terdeteksi! Install: pkg install mpg123){RESET}")
+            print(f"{YELLOW}{DIM}   (WARNING: Termux:API command tidak terdeteksi! Install: pkg install termux-api){RESET}")
     else:
         print_centered("Mode Pemutaran MP3: NONAKTIF", YELLOW, BOLD)
     print_separator('─', GREEN if mp3_active else YELLOW)
@@ -445,8 +467,10 @@ def start_listening(settings):
 
     print(f"\n{YELLOW}{BOLD}[INFO] Listener dihentikan.{RESET}")
 
+
 # --- Fungsi Menu Pengaturan ---
 def show_settings(settings):
+    # ... (fungsi sama, update teks MP3) ...
     while True:
         clear_screen()
         print_header("Pengaturan Listener Email MP3")
@@ -461,17 +485,15 @@ def show_settings(settings):
         print(f" {CYAN}5. Keyword Target{RESET} : '{settings['target_keyword']}'")
         print(f" {CYAN}6. Keyword Trigger{RESET}: '{settings['trigger_keyword']}'")
 
-        print(f"\n{BOLD}{YELLOW} M P 3   S I G N A L   (via mpg123) {RESET}")
+        print(f"\n{BOLD}{YELLOW} M P 3   S I G N A L   (via Termux:API) {RESET}")
         print(f"{DIM}─────────────────────────────{RESET}")
         mp3_status = f"{GREEN}{BOLD}Aktif{RESET}" if settings['play_mp3_on_signal'] else f"{YELLOW}Nonaktif{RESET}"
         print(f" {YELLOW}7. Mainkan MP3?{RESET}   : {mp3_status}")
-        # Tidak perlu cek library 'playsound' lagi
-        mpg123_ok = shutil.which("mpg123") is not None
-        mpg123_stat = f"{GREEN}OK{RESET}" if mpg123_ok else f"{RED}Tidak Ada!{RESET}"
-        print(f"   {DIM}└─ Perintah 'mpg123': {mpg123_stat} {DIM} (Perlu: buy.mp3 & sell.mp3){RESET}")
-        if not mpg123_ok:
-            print(f"     {RED}{DIM}↳ Install dengan: pkg install mpg123{RESET}")
-
+        termux_api_ok = shutil.which("termux-media-player") is not None
+        termux_api_stat = f"{GREEN}OK{RESET}" if termux_api_ok else f"{RED}Tidak Ada!{RESET}"
+        print(f"   {DIM}└─ Termux:API Cmd : {termux_api_stat} {DIM} (Perlu: buy.mp3 & sell.mp3){RESET}")
+        if not termux_api_ok:
+            print(f"     {RED}{DIM}↳ Install dengan: pkg install termux-api{RESET}")
 
         print_separator(color=MAGENTA)
 
@@ -496,6 +518,7 @@ def show_settings(settings):
             print(f"{DIM}(Kosongkan input untuk skip / tidak ubah){RESET}")
 
             print(f"\n{CYAN}--- Email ---{RESET}")
+            # ... (input email 1-6 sama) ...
             if val := input(f" 1. Email [{settings['email_address']}]: ").strip(): settings['email_address'] = val
             print(f" 2. App Password (input tersembunyi): ", end='', flush=True)
             try: pwd = getpass.getpass("")
@@ -511,7 +534,8 @@ def show_settings(settings):
             if val := input(f" 5. Keyword Target [{settings['target_keyword']}]: ").strip(): settings['target_keyword'] = val
             if val := input(f" 6. Keyword Trigger [{settings['trigger_keyword']}]: ").strip(): settings['trigger_keyword'] = val
 
-            print(f"\n{YELLOW}--- MP3 Signal (via mpg123) ---{RESET}")
+
+            print(f"\n{YELLOW}--- MP3 Signal (via Termux:API) ---{RESET}")
             while True:
                  curr = settings['play_mp3_on_signal']
                  prompt = f"{GREEN}Aktif{RESET}" if curr else f"{YELLOW}Nonaktif{RESET}"
@@ -533,11 +557,12 @@ def show_settings(settings):
 
 # --- Fungsi Menu Utama ---
 def main_menu():
+    # ... (fungsi sama, update teks MP3) ...
     settings = load_settings()
 
     while True:
         clear_screen()
-        print_header("Exora AI - Email Listener MP3 (via mpg123)")
+        print_header("Exora AI - Email Listener MP3 (via Termux:API)")
 
         print(f"\n{BOLD}{CYAN} S T A T U S {RESET}")
         print(f"{DIM}─────────────────────────────{RESET}")
@@ -548,15 +573,15 @@ def main_menu():
         print(f"   ├─ Config: Email [{GREEN if email_ok else RED}{'✓' if email_ok else 'X'}{RESET}] | App Pass [{GREEN if pass_ok else RED}{'✓' if pass_ok else 'X'}{RESET}]")
         print(f"   └─ Server: {settings.get('imap_server', '?')}, Interval: {settings.get('check_interval_seconds')}s")
 
-        print(f" {YELLOW}MP3 Signal (via mpg123):{RESET}")
+        print(f" {YELLOW}MP3 Signal (via Termux:API):{RESET}")
         mp3_active = settings.get("play_mp3_on_signal", True)
         mp3_status = f"{GREEN}{BOLD}AKTIF{RESET}" if mp3_active else f"{YELLOW}NONAKTIF{RESET}"
         print(f"   ├─ Status  : {mp3_status}")
-        mpg123_ok = shutil.which("mpg123") is not None
-        mpg123_stat = f"{GREEN}✓ Terinstall{RESET}" if mpg123_ok else f"{RED}X Tidak Ditemukan!{RESET}"
-        print(f"   └─ Req     : {mpg123_stat} | Files (buy/sell.mp3) {DIM}[Cek Manual]{RESET}")
-        if mp3_active and not mpg123_ok:
-             print(f"     {RED}{DIM}↳ 'mpg123' tidak ada! Install: pkg install mpg123{RESET}")
+        termux_api_ok = shutil.which("termux-media-player") is not None
+        termux_api_stat = f"{GREEN}✓ Terinstall{RESET}" if termux_api_ok else f"{RED}X Tidak Ditemukan!{RESET}"
+        print(f"   └─ Req     : {termux_api_stat} | Files (buy/sell.mp3) {DIM}[Cek Manual]{RESET}")
+        if mp3_active and not termux_api_ok:
+             print(f"     {RED}{DIM}↳ Termux:API command tidak ada! Install: pkg install termux-api{RESET}")
 
         print_separator(color=MAGENTA)
 
@@ -596,24 +621,18 @@ def main_menu():
                 errors.append("Email/App Password belum lengkap.")
 
             mp3_active = settings.get("play_mp3_on_signal", True)
-            # Validasi mpg123 jika MP3 aktif
-            if mp3_active and not shutil.which("mpg123"):
-                errors.append("Mode MP3 aktif tapi perintah 'mpg123' tidak ditemukan. (Install: pkg install mpg123)")
-            # Optional: Cek file MP3 sebelum mulai
-            # if mp3_active:
-            #     script_dir = os.path.dirname(os.path.abspath(__file__))
-            #     if not os.path.exists(os.path.join(script_dir, 'buy.mp3')): errors.append("File buy.mp3 tidak ada.")
-            #     if not os.path.exists(os.path.join(script_dir, 'sell.mp3')): errors.append("File sell.mp3 tidak ada.")
-
+            # Validasi Termux:API jika MP3 aktif
+            if mp3_active and not shutil.which("termux-media-player"):
+                errors.append("Mode MP3 aktif tapi perintah 'termux-media-player' tidak ditemukan. (Install: pkg install termux-api)")
 
             if errors:
                 print(f"\n{BOLD}{RED}--- TIDAK BISA MEMULAI ---{RESET}")
                 for i, err in enumerate(errors): print(f" {RED}{i+1}. {err}{RESET}")
-                print(f"\n{YELLOW}Perbaiki di 'Pengaturan' atau install 'mpg123'.{RESET}")
+                print(f"\n{YELLOW}Perbaiki di 'Pengaturan' atau install 'termux-api'.{RESET}")
                 input(f"{DIM}Tekan Enter untuk kembali...{RESET}")
             else:
                 clear_screen()
-                mode = "MP3 Mode (via mpg123)" if mp3_active else "Email Listener Only"
+                mode = "MP3 Mode (via Termux:API)" if mp3_active else "Email Listener Only"
                 print_header(f"Memulai Mode: {mode}")
                 start_listening(settings)
                 print(f"\n{YELLOW}[INFO] Kembali ke Menu Utama...{RESET}")
@@ -636,12 +655,13 @@ if __name__ == "__main__":
     if sys.version_info < (3, 6):
         print("Error: Butuh Python 3.6+"); sys.exit(1)
 
-    # Beri tahu user soal mpg123 jika belum ada
-    if not shutil.which("mpg123"):
-        print(f"{YELLOW}Tips: Untuk fitur MP3, script ini butuh 'mpg123'.{RESET}")
-        print(f"{YELLOW}      Jalankan di Termux: {RESET}pkg install mpg123")
+    # Beri tahu user soal termux-api jika belum ada
+    if not shutil.which("termux-media-player"):
+        print(f"{YELLOW}Tips: Untuk fitur MP3, script ini butuh Termux:API.{RESET}")
+        print(f"{YELLOW}      Jalankan di Termux: {RESET}pkg install termux-api")
         print(f"{DIM}(Pastikan juga file buy.mp3 & sell.mp3 ada di folder script){RESET}")
-        time.sleep(3) # Beri waktu baca sebelum menu
+        print(f"{DIM}(Mungkin perlu juga install aplikasi Termux:API dari F-Droid/Play Store){RESET}")
+        time.sleep(4) # Beri waktu baca sebelum menu
 
     try:
         main_menu()
